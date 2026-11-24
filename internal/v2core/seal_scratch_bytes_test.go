@@ -18,7 +18,7 @@ func sealScratchBytes(r *coreRollups) (total, pointerful int) {
 		}
 	}
 	add(len(r.stages), unsafe.Sizeof(rollupStage{}), false)
-	add(len(r.stageMetrics), unsafe.Sizeof((*rollupMetric)(nil)), true)
+	add(len(r.stageMetrics), unsafe.Sizeof((*PolicyIdentity)(nil)), true)
 	add(len(r.batches), unsafe.Sizeof(sealrollup.Batch{}), true)
 	add(len(r.samples), unsafe.Sizeof(sealrollup.Sample{}), false)
 	add(len(r.sweepKeys)+len(r.seen), 8, false)

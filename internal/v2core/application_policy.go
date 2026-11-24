@@ -16,3 +16,9 @@ func (h *ApplicationPolicy) RollupPolicy() RollupPolicy { return h.rollupPolicy(
 func (e *coreEngine) RegisterApplicationPolicy(id uint64, name string, encoded []byte) (*ApplicationPolicy, error) {
 	return e.identities.intern(id, name, encoded)
 }
+
+// MatchesApplicationPolicy checks the engine epoch and authoritative numeric ID.
+// Producer-local IDs are mapped by the caller without a per-point lookup.
+func (e *coreEngine) MatchesApplicationPolicy(h *ApplicationPolicy, id uint64) bool {
+	return h != nil && h.catalog == e.identities && h.id == id
+}

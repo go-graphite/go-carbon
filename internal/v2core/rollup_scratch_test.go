@@ -24,7 +24,7 @@ func sealTimeOnlyFixture(tb testing.TB, names, perName int, seed int64) (*coreRo
 	r := newCoreRollups()
 	r.parallelism = 1
 	rng := rand.New(rand.NewSource(seed))
-	metrics := make([]*rollupMetric, names)
+	metrics := make([]*PolicyIdentity, names)
 	for i := range metrics {
 		id := uint64(i + 1)
 		name := fmt.Sprintf("containers.k8s.prod.cluster-%02d.namespace-%03d.pod-%06x.owner-%d.container.cpu_usage_seconds_total", i%7, (i/7)%311, i, seed)
@@ -45,7 +45,7 @@ func sealTimeOnlyFixture(tb testing.TB, names, perName int, seed int64) (*coreRo
 		start := len(batches)
 		for i, m := range metrics {
 			t := int64(100000 + round)
-			batches = append(batches, Batch{ID: uint64(i + 1), Registered: m.PolicyIdentity, Clock: t, Points: []Row{{Time: t, Bits: uint64(rng.Int63()), Seq: 1}}})
+			batches = append(batches, Batch{ID: uint64(i + 1), Registered: m, Clock: t, Points: []Row{{Time: t, Bits: uint64(rng.Int63()), Seq: 1}}})
 		}
 		rng.Shuffle(len(batches)-start, func(i, j int) { batches[start+i], batches[start+j] = batches[start+j], batches[start+i] })
 	}
@@ -189,7 +189,7 @@ func (r *coreRollups) retainedScratchBytes() int {
 	if !reflect.ValueOf(r.pendingNames).IsZero() {
 		n += int(unsafe.Sizeof(r.pendingNames))
 	}
-	n += cap(r.stages)*int(unsafe.Sizeof(rollupStage{})) + cap(r.stageMetrics)*int(unsafe.Sizeof((*rollupMetric)(nil))) + cap(r.samples)*int(unsafe.Sizeof(sealrollup.Sample{})) + cap(r.batches)*int(unsafe.Sizeof(sealrollup.Batch{})) + cap(r.arena)
+	n += cap(r.stages)*int(unsafe.Sizeof(rollupStage{})) + cap(r.stageMetrics)*int(unsafe.Sizeof((*PolicyIdentity)(nil))) + cap(r.samples)*int(unsafe.Sizeof(sealrollup.Sample{})) + cap(r.batches)*int(unsafe.Sizeof(sealrollup.Batch{})) + cap(r.arena)
 	for i := range r.lanes {
 		lane := &r.lanes[i]
 		n += (cap(lane.ranked)+cap(lane.spare))*int(unsafe.Sizeof(rollupRankRef{})) + cap(lane.counts)*8 + cap(lane.records)*int(unsafe.Sizeof(sealrollup.Record{})) + cap(lane.output.arena)

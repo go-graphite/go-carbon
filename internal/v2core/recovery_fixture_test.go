@@ -27,7 +27,7 @@ func rollupStateDigest(r *coreRollups) string {
 	return b.String()
 }
 
-func nameIndexed(r *coreRollups, m *rollupMetric) bool {
+func nameIndexed(r *coreRollups, m *PolicyIdentity) bool {
 	_, ok := r.names.Get(m.fingerprint())
 	return ok
 }

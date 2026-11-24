@@ -241,14 +241,13 @@ func (w *sealSweepWorld) adopt() *coreRollups {
 	return next
 }
 
-// move replaces every 7th installed metric with a struct copy in place, so
-// the stale dense entry must drop at the next renumber.
+// move reinstalls every 7th metric as move adoption does. The canonical
+// identity is shared; there is no separate owner wrapper to replace.
 func (w *sealSweepWorld) move(seal int) {
 	for id := range w.r.metrics {
 		m := w.r.installed(id)
 		if id%7 == uint64(seal%7) {
-			c := *m
-			w.r.install(id, &c, w.r.metaOf(id))
+			w.r.install(id, m, w.r.metaOf(id))
 		}
 	}
 }

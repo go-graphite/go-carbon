@@ -34,8 +34,7 @@ func TestExpiryColumnsActivation(t *testing.T) {
 				}
 				if phase > 0 {
 					old := r.dense[0]
-					replacement := *old
-					r.install(old.id, &replacement, r.metaOf(old.id))
+					r.install(old.id, rankTestReplacement(old), r.metaOf(old.id))
 				}
 				r.renumber()
 				checkRankArray(t, r, phase)

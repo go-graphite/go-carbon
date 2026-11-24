@@ -24,7 +24,7 @@ func checkRankArray(t *testing.T, r *coreRollups, seal int) {
 	if len(r.ids) != len(r.dense)+len(r.unranked) || len(r.meta) != len(r.ids) {
 		t.Fatalf("seal %d: slot arrays out of step: ids %d meta %d dense %d unranked %d", seal, len(r.ids), len(r.meta), len(r.dense), len(r.unranked))
 	}
-	slotMetric := func(s int) *rollupMetric {
+	slotMetric := func(s int) *PolicyIdentity {
 		if s < len(r.dense) {
 			return r.dense[s]
 		}
@@ -50,7 +50,7 @@ func checkRankArray(t *testing.T, r *coreRollups, seal int) {
 	for id := range r.metrics {
 		m := r.installed(id)
 		s, ok := owner[id]
-		if h, hinted := r.hintSlot(m.PolicyIdentity, id); !ok || hinted && h != uint32(s) {
+		if h, hinted := r.hintSlot(m, id); !ok || hinted && h != uint32(s) {
 			t.Fatalf("seal %d: id %d has no slot or a hint to another slot", seal, id)
 		}
 	}
@@ -65,7 +65,7 @@ func hasDeadSlot(r *coreRollups) bool {
 // next plan re-sorts the whole planner from scratch: a reference that shares
 // no incremental merge state with a long-lived planner.
 func unrankAll(r *coreRollups) {
-	var ms []*rollupMetric
+	var ms []*PolicyIdentity
 	var ids []uint64
 	var meta []metricMetadata
 	var ttl, expAt []int64
@@ -185,7 +185,11 @@ func rankBoundaryRun(t *testing.T, workers int, adopt bool) {
 						for id := range p.metrics {
 							m := p.installed(id)
 							if id%mod == 1 {
-								p.install(id, newRollupMetric(m.PolicyIdentity), freshMetadata)
+								replacement, err := (&PolicyCatalog{}).intern(id, m.Name(), m.Definition())
+								if err != nil {
+									t.Fatal(err)
+								}
+								p.install(id, replacement, freshMetadata)
 							}
 						}
 					}
@@ -241,7 +245,7 @@ func rankBoundaryRun(t *testing.T, workers int, adopt bool) {
 					// slot. This seal's plan reaches them through slotOf's
 					// search, which restores each hint.
 					for i, m := range ranked.dense {
-						if s, ok := ranked.hintSlot(m.PolicyIdentity, m.id); !ok || s != uint32(i) {
+						if s, ok := ranked.hintSlot(m, m.id); !ok || s != uint32(i) {
 							lostRanked++
 						}
 					}
@@ -285,7 +289,7 @@ func rankBoundaryRun(t *testing.T, workers int, adopt bool) {
 				checkRankArray(t, ranked, seal)
 				if renumbering {
 					for i, m := range ranked.dense {
-						if s, ok := ranked.hintSlot(m.PolicyIdentity, m.id); !ok || s != uint32(i) {
+						if s, ok := ranked.hintSlot(m, m.id); !ok || s != uint32(i) {
 							t.Fatalf("seal %d: renumber left dense[%d] id %d without its hint", seal, i, m.id)
 						}
 					}
@@ -307,15 +311,10 @@ func rankBoundaryRun(t *testing.T, workers int, adopt bool) {
 // TestPolicyIdentityFitsSizeClass pins PolicyIdentity's per-name heap at Go's
 // 64 B size class. Each identity is allocated alone, and Go has no 56 B class,
 // so any size from 49 B to 64 B costs the same 64 B. The slot hint and the
-// fingerprint's route half both fit inside it. rollupMetric keeps #1587's size.
+// fingerprint's route half both fit inside it. Owners retain this identity directly.
 func TestPolicyIdentityFitsSizeClass(t *testing.T) {
 	if got := reflect.TypeFor[PolicyIdentity]().Size(); got > 64 {
 		t.Fatalf("PolicyIdentity is %d B, past the 64 B size class", got)
-	}
-	// The committed scalars live in the owner's pointer-free meta array and
-	// routing identity; sample residency is absent.
-	if got := reflect.TypeFor[rollupMetric]().Size(); got != 16 {
-		t.Fatalf("rollupMetric is %d B, want 16", got)
 	}
 }
 
@@ -337,8 +336,8 @@ func TestRollupSlotArraysScaleWithNames(t *testing.T) {
 	for id := range r.metrics {
 		m := r.installed(id)
 		if id%5 == 0 {
-			c := *m
-			r.install(id, &c, r.metaOf(id))
+			c := rankTestReplacement(m)
+			r.install(id, c, r.metaOf(id))
 		}
 	}
 	r.renumber()

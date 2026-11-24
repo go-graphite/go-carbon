@@ -412,7 +412,7 @@ func TestPendingMetadataDueIncremental(t *testing.T) {
 			// first, so a pass that skips one position diverges.
 			for _, b := range packet {
 				r.metrics[b.ID] = uint32(len(r.unranked))
-				r.unranked = append(r.unranked, &rollupMetric{})
+				r.unranked = append(r.unranked, &PolicyIdentity{})
 			}
 			if rng.IntN(2) == 0 {
 				fresh := 0
@@ -446,7 +446,7 @@ func TestPendingMetadataDueIncremental(t *testing.T) {
 				// would, and start a fresh head.
 				h.view(find).IDs(0, h.n, func(_ int, id uint64, _ *coreBatch) bool {
 					r.metrics[id] = uint32(len(r.unranked))
-					r.unranked = append(r.unranked, &rollupMetric{})
+					r.unranked = append(r.unranked, &PolicyIdentity{})
 					return true
 				})
 				h = pendingHead{}
@@ -479,7 +479,7 @@ func BenchmarkPendingScan(b *testing.B) {
 	r := newCoreRollups()
 	for id := range pols {
 		r.metrics[uint64(id)+1] = uint32(len(r.unranked))
-		r.unranked = append(r.unranked, &rollupMetric{})
+		r.unranked = append(r.unranked, &PolicyIdentity{})
 	}
 	encoded := make([]pendingRows, len(packets))
 	for i, packet := range packets {

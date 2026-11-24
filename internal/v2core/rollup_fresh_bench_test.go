@@ -28,7 +28,7 @@ func BenchmarkRollupFreshPlanning(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				batches[i] = Batch{ID: id, Registered: m.PolicyIdentity, Order: 1, Clock: 1000, Points: []Row{{Time: 999, Seq: 1}}}
+				batches[i] = Batch{ID: id, Registered: m, Order: 1, Clock: 1000, Points: []Row{{Time: 999, Seq: 1}}}
 			}
 			b.ReportAllocs()
 			b.ResetTimer()

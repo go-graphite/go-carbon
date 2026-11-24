@@ -24,7 +24,7 @@ func BenchmarkClosedWindowSealCPU(b *testing.B) {
 			b.Fatal(err)
 		}
 		r.install(m.id, m, freshMetadata)
-		input[i] = Batch{ID: m.id, Registered: m.PolicyIdentity, Points: make([]Row, 1)}
+		input[i] = Batch{ID: m.id, Registered: m, Points: make([]Row, 1)}
 	}
 	b.ReportAllocs()
 	b.ResetTimer()

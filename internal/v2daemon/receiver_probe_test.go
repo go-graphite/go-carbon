@@ -156,10 +156,10 @@ func TestApplicationOwnerProbeGrowthAndSharing(t *testing.T) {
 		}
 		registered := p.applications[local]
 		owned, _ := p.catalog.Key(uint64(local))
-		if registered == nil || registered.name() != name {
+		if registered == nil || registered.Name() != name {
 			t.Fatalf("%q resolves to %v", name, registered)
 		}
-		at := unsafe.StringData(registered.name())
+		at := unsafe.StringData(registered.Name())
 		if at != unsafe.StringData(owned) || at == unsafe.StringData(name) {
 			t.Fatalf("%q is a separate copy, not the catalog's string", name)
 		}
@@ -274,15 +274,11 @@ func TestApplicationOwnerProbeRefusesOneAtATime(t *testing.T) {
 	}
 }
 
-// TestRegisteredApplicationHoldsNoName pins the handle at 24 B with no name
-// header: the catalog (the shared identity on layer 3) holds the one copy, and
-// name() resolves it by ID on both the identity and the catalog-only path.
-func TestRegisteredApplicationHoldsNoName(t *testing.T) {
-	if size := unsafe.Sizeof(RegisteredApplication{}); size != 24 {
-		t.Fatalf("RegisteredApplication is %d B, want 24 (no per-name name header)", size)
-	}
+// TestRegisteredApplicationReusesIdentity checks direct and mirrored admission
+// retain the engine identity itself, with the catalog owning its name.
+func TestRegisteredApplicationReusesIdentity(t *testing.T) {
 	s3, resolve := openProbeStore(t)
-	// A mirroring store registers catalog-only handles (no core identity).
+	// Mirroring retains the same epoch-bound identity as direct intake.
 	s2, err := Open(t.TempDir(), Config{Layer: 3, Producers: 1, Shards: 1, GroupInterval: time.Hour, Mirror: func(int, []v2core.Batch) error { return nil }})
 	if err != nil {
 		t.Fatal(err)
@@ -299,17 +295,17 @@ func TestRegisteredApplicationHoldsNoName(t *testing.T) {
 				t.Fatal(err)
 			}
 			text := strings.Clone(name)
-			r, err := p.RegisterApplication(text, policy)
+			r, id, err := p.RegisterApplication(text, policy)
 			if err != nil {
 				t.Fatal(err)
 			}
-			got := r.name()
-			owned, _ := p.catalog.Key(r.id)
+			got := r.Name()
+			owned, _ := p.catalog.Key(id)
 			if got != name || unsafe.StringData(got) != unsafe.StringData(owned) {
 				t.Fatalf("layer %d: name()=%q, want the catalog's own %q", p.layer, got, name)
 			}
-			if (p.mirror == nil) != (r.policy != nil) {
-				t.Fatalf("mirror %t: policy=%v", p.mirror != nil, r.policy)
+			if r != p.engine.ApplicationPolicy(NumericID(id, p.index, p.count)) {
+				t.Fatal("registration allocated a separate identity")
 			}
 		}
 	}

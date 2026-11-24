@@ -66,12 +66,6 @@ type RollupMetadata struct {
 	Revision   uint64
 }
 
-// rollupMetric retains identity and routing; samples live in immutable parts.
-type rollupMetric struct {
-	*PolicyIdentity
-	vshard uint16
-}
-
 type rollupCoverage struct {
 	spec partsformat.Spec
 	seen map[[32]byte]bool
@@ -112,7 +106,7 @@ type coreRollups struct {
 	// stages is the seal's pointer-free work list; stageMetrics[i] is the
 	// metric of stages[i], the only pointer per stage.
 	stages       []rollupStage
-	stageMetrics []*rollupMetric
+	stageMetrics []*PolicyIdentity
 	pendingNames namefp.Table
 	// sweepKeys/sweepSpare are the seal's sorted batch keys and radix spare,
 	// seen the expiry pass's bitset of staged IDs. The seal borrows these
@@ -141,8 +135,8 @@ type coreRollups struct {
 	// metric's identity; renumber moves ids and meta with their metric and
 	// re-stores the hints. ids and meta are pointer-free and sized by this
 	// owner's names, not by the engine-wide ID space.
-	dense    []*rollupMetric
-	unranked []*rollupMetric
+	dense    []*PolicyIdentity
+	unranked []*PolicyIdentity
 	ids      []uint64
 	meta     []metricMetadata
 	// dictDirty reports a dictionary append no successful seal Sync covers
@@ -169,7 +163,7 @@ func newCoreRollups() *coreRollups {
 
 // install is the only writer of metrics and names. It indexes every installed
 // name and files its inactivity expiry, when enabled. meta becomes id's scalars.
-func (r *coreRollups) install(id uint64, m *rollupMetric, meta metricMetadata) {
+func (r *coreRollups) install(id uint64, m *PolicyIdentity, meta metricMetadata) {
 	old := r.installed(id)
 	s := uint32(len(r.ids))
 	if old != nil {
@@ -225,7 +219,7 @@ func (r *coreRollups) clock() time.Time {
 }
 
 // resolveTTL caches slot's expiry window and tracks when any answer expires.
-func (r *coreRollups) resolveTTL(slot uint32, m *rollupMetric, now time.Time) {
+func (r *coreRollups) resolveTTL(slot uint32, m *PolicyIdentity, now time.Time) {
 	// Recovery and expiry-off owners have no columns. Activation fills all
 	// existing slots; subsequent installs extend them with the slot arrays.
 	if n := len(r.ids) - len(r.ttl); n > 0 {
@@ -314,7 +308,7 @@ func (r *coreRollups) commitExpiries() {
 
 // slotMetric is the metric installed in slot: dense below len(dense),
 // unranked above.
-func (r *coreRollups) slotMetric(slot uint32) *rollupMetric {
+func (r *coreRollups) slotMetric(slot uint32) *PolicyIdentity {
 	if d := uint32(len(r.dense)); slot < d {
 		return r.dense[slot]
 	}
@@ -451,16 +445,12 @@ func (r *coreRollups) noteNewNames(h *pendingHead, lookup func(uint64) *Applicat
 	h.freshScanned = h.n
 }
 
-func (r *coreRollups) metric(id uint64, policy []byte) (*rollupMetric, error) {
+func (r *coreRollups) metric(id uint64, policy []byte) (*PolicyIdentity, error) {
 	h, err := r.identities.intern(id, "", policy)
 	if err != nil {
 		return nil, err
 	}
-	return newRollupMetric(h), nil
-}
-
-func newRollupMetric(h *PolicyIdentity) *rollupMetric {
-	return &rollupMetric{PolicyIdentity: h, vshard: h.vshard}
+	return h, nil
 }
 
 // freshMetadata is the committed state of a name no seal has installed yet.
@@ -600,7 +590,7 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		}
 		// A valid identity hint reaches either kind of owner slot directly.
 		// Missing or overwritten hints use the owner's numeric slot map.
-		var m *rollupMetric
+		var m *PolicyIdentity
 		slot, hinted := r.hintSlot(firstRegistered, id)
 		rk := uint32(0)
 		if hinted {
@@ -618,7 +608,7 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		}
 		if fresh {
 			if h := firstRegistered; h != nil && h.catalog == r.identities && h.id == id {
-				m = newRollupMetric(h)
+				m = h
 			} else {
 				policy := firstPolicy
 				if h != nil {
@@ -662,7 +652,7 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 			if a.cold != nil {
 				reg, policy = a.cold.Registered, a.cold.Policy
 			}
-			if (reg == nil || reg != m.PolicyIdentity) && !m.definitionEqual(policy) {
+			if (reg == nil || reg != m) && !m.definitionEqual(policy) {
 				return coreSealPlan{}, errors.New("stored rollup policy changed")
 			}
 			n := a.points()
@@ -739,7 +729,7 @@ func (r *coreRollups) expireIdleStages(now time.Time, seq uint64) error {
 	ns := now.UnixNano()
 	for i := range r.stages {
 		s, m := &r.stages[i], r.stageMetrics[i]
-		if s.batches == 0 && r.expiryOverdue(s.slot, ns) && r.expire(m.rollupPolicy(), m.PolicyIdentity.metadata(s.next), now) {
+		if s.batches == 0 && r.expiryOverdue(s.slot, ns) && r.expire(m.rollupPolicy(), m.metadata(s.next), now) {
 			// Older readers must reject reset authority rather than ignore its
 			// fields and resurrect the covered slot history.
 			s.next.Version = max(2, s.next.Version)
@@ -949,7 +939,7 @@ func recoverCoreRollups(db *pebble.DB, catalogs ...*PolicyCatalog) (*coreRollups
 		}
 		m := r.installed(meta.ID)
 		if m == nil {
-			m = newRollupMetric(entry.identity)
+			m = entry.identity
 		} else if !entry.meta.after(r.meta[r.slotOf(meta.ID, m)]) {
 			continue
 		}

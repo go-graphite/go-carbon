@@ -35,9 +35,21 @@ var rankTestPrepared = func() *sealrollup.Prepared {
 	return p
 }()
 
-func rankTestMetric(i int) *rollupMetric {
+func rankTestMetric(i int) *PolicyIdentity {
 	def := &policyDefinition{prepared: rankTestPrepared, Group: partsformat.Group([]string{"z", "ab", "aa", "a"}[i%4])}
-	return &rollupMetric{PolicyIdentity: (&PolicyIdentity{id: uint64(i + 1), policy: policyName{policyDefinition: def}}).withName(rankTestName(i)), vshard: uint16((i * 2654435761) % 4096)}
+	return (&PolicyIdentity{id: uint64(i + 1), policy: policyName{policyDefinition: def}, vshard: uint16((i * 2654435761) % 4096)}).withName(rankTestName(i))
+}
+
+// rankTestReplacement gives owner-slot tests a distinct identity without
+// copying atomics. Real move adoption shares the canonical identity instead.
+func rankTestReplacement(h *PolicyIdentity) *PolicyIdentity {
+	c := &PolicyIdentity{catalog: h.catalog, id: h.id, policy: h.policy,
+		nameLen: h.nameLen, vshard: h.vshard, plain: h.plain,
+		route: h.route, nameHash: h.nameHash}
+	c.name.Store(h.name.Load())
+	c.ownerSlot.Store(h.ownerSlot.Load())
+	c.dictID.Store(h.dictID.Load())
+	return c
 }
 
 // checkDense asserts every live metric is ranked exactly once, in canonical
@@ -65,7 +77,7 @@ func TestRollupRankSortMatchesMetricOrder(t *testing.T) {
 		t.Run(fmt.Sprint(n), func(t *testing.T) {
 			rng := rand.New(rand.NewPCG(uint64(n), 3))
 			r := newCoreRollups()
-			all := make([]*rollupMetric, n)
+			all := make([]*PolicyIdentity, n)
 			for i := range all {
 				all[i] = rankTestMetric(i)
 			}
@@ -76,14 +88,14 @@ func TestRollupRankSortMatchesMetricOrder(t *testing.T) {
 			checkDense(t, r)
 			// Replace a few installed metrics with struct copies (stale rank),
 			// then reinstall some originals over their copies.
-			origs := map[uint64]*rollupMetric{}
+			origs := map[uint64]*PolicyIdentity{}
 			for id := range r.metrics {
 				m := r.installed(id)
 				if id%7 == 0 {
-					c := *m
+					c := rankTestReplacement(m)
 					origs[id] = m
-					r.install(id, &c, r.metaOf(id))
-					all[id-1] = &c
+					r.install(id, c, r.metaOf(id))
+					all[id-1] = c
 				}
 			}
 			for id, m := range origs {
@@ -101,7 +113,7 @@ func TestRollupRankSortMatchesMetricOrder(t *testing.T) {
 			for round := 0; round < 2; round++ {
 				var refs []rollupRankRef
 				stages := make([]rollupStage, 0, n)
-				var metrics []*rollupMetric
+				var metrics []*PolicyIdentity
 				for _, m := range all {
 					if r.installed(m.id) == m || rng.IntN(4) == 0 {
 						stages, metrics = append(stages, rollupStage{}), append(metrics, m)
@@ -210,13 +222,12 @@ func TestRollupPlanRankDifferential(t *testing.T) {
 						*p = next
 					}
 				case 45, 75:
-					// A move replaces every 7th installed metric in place.
+					// A move reinstalls every 7th canonical identity in place.
 					for _, p := range []*coreRollups{ranked, ref} {
 						for id := range p.metrics {
 							m := p.installed(id)
 							if id%7 == uint64(seal%7) {
-								c := *m
-								p.install(id, &c, p.metaOf(id))
+								p.install(id, m, p.metaOf(id))
 							}
 						}
 					}

@@ -70,15 +70,15 @@ func (o *applicationOwner) register(name string, fp namefp.Fingerprint) (uint32,
 	if err != nil {
 		return 0, err
 	}
-	registered, err := o.p.RegisterApplication(name, policy)
+	_, id, err := o.p.RegisterApplication(name, policy)
 	if err != nil {
 		return 0, err
 	}
-	if registered.id > namefp.MaxLocal {
+	if id > namefp.MaxLocal {
 		return 0, errors.New("receiver name table: producer catalog ID exceeds 32 bits")
 	}
-	o.names.Put(fp, uint32(registered.id))
-	return uint32(registered.id), nil
+	o.names.Put(fp, uint32(id))
+	return uint32(id), nil
 }
 
 func (o *applicationOwner) Append(names []string, hashes []uint64, data []points.Point, _ []uint64, clock int64) error {
@@ -130,7 +130,7 @@ func (o *applicationOwner) appendNames(names []string, text []byte, ends []int, 
 			if local == 0 {
 				name = string(raw)
 			} else if o.throttle != nil {
-				name = o.p.applications[local].name() // quota checks reuse the catalog string
+				name = o.p.applications[local].Name() // quota checks reuse the catalog string
 			}
 		}
 		if o.throttle != nil && o.throttle(&points.Points{Metric: name, Data: data[i : i+1]}, false) {
@@ -151,7 +151,7 @@ func (o *applicationOwner) appendNames(names []string, text []byte, ends []int, 
 		index := len(apps)
 		order := o.p.applyOrder + uint64(index) + 1
 		o.sequence[index] = order
-		apps = append(apps, Application{Registered: o.p.applications[local], Order: order, Clock: clock, Points: data[i : i+1], Sequence: o.sequence[index : index+1 : index+1]})
+		apps = append(apps, Application{Registered: o.p.applications[local], LocalID: uint64(local), Order: order, Clock: clock, Points: data[i : i+1], Sequence: o.sequence[index : index+1 : index+1]})
 	}
 	if len(apps) == 0 {
 		return nil

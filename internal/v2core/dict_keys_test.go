@@ -12,10 +12,10 @@ import (
 // vshards, as a first seal of n names.
 func dictKeysPlanner(n int) *coreRollups {
 	def := &policyDefinition{Group: "g"}
-	r := &coreRollups{stages: make([]rollupStage, n), stageMetrics: make([]*rollupMetric, n)}
+	r := &coreRollups{stages: make([]rollupStage, n), stageMetrics: make([]*PolicyIdentity, n)}
 	for i := range n {
 		vs := uint16(i % 3)
-		r.stageMetrics[i] = &rollupMetric{PolicyIdentity: (&PolicyIdentity{policy: policyName{policyDefinition: def}}).withName(fmt.Sprintf("dict.keys.%06d", n-i)), vshard: vs}
+		r.stageMetrics[i] = (&PolicyIdentity{policy: policyName{policyDefinition: def}, vshard: vs}).withName(fmt.Sprintf("dict.keys.%06d", n-i))
 	}
 	return r
 }

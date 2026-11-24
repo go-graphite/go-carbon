@@ -46,7 +46,7 @@ func TestRollupRegisteredPolicyAfterReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	metric := recovered.installed(7)
-	if metric == nil || metric.PolicyIdentity == nil {
+	if metric == nil {
 		t.Fatal("expected recovered metric with shared immutable identity")
 	}
 	// Journal replay admits canonical bytes before live producer registration.
@@ -76,18 +76,18 @@ func TestRollupRegisteredPolicyAfterReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	recoveredIdentity := metric.PolicyIdentity
+	recoveredIdentity := metric
 	if recovered.metaOf(7).Frontier.Order != 1 {
 		t.Fatal("planning changed recovered frontier")
 	}
 	plan.Abort()
-	if metric.PolicyIdentity != recoveredIdentity || recovered.metaOf(7).Frontier.Order != 1 {
+	if metric != recoveredIdentity || recovered.metaOf(7).Frontier.Order != 1 {
 		t.Fatal("aborted seal changed recovered metric")
 	}
 	if _, err = recovered.plan(SealInput{Batches: []Batch{batch(4, changed, wrong)}}); err == nil {
 		t.Fatal("accepted changed policy for recovered metric")
 	}
-	if metric.PolicyIdentity != recoveredIdentity {
+	if metric != recoveredIdentity {
 		t.Fatal("failed plan replaced recovered identity")
 	}
 	plan, err = recovered.plan(in)
@@ -95,7 +95,7 @@ func TestRollupRegisteredPolicyAfterReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	plan.Commit()
-	if metric.PolicyIdentity != recoveredIdentity || recovered.metaOf(7).Frontier.Order != 4 {
+	if metric != recoveredIdentity || recovered.metaOf(7).Frontier.Order != 4 {
 		t.Fatal("committed matching seal did not bind recovered metric")
 	}
 }

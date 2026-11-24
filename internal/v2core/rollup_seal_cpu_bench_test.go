@@ -53,7 +53,7 @@ func sealCPUFixture(tb testing.TB, shape sealCPUShape, names int) (*coreRollups,
 			rows[j] = Row{Time: 100000 + int64(j)*shape.step, Bits: uint64(rng.Int63()), Seq: uint64(j + 1)}
 		}
 		points += len(rows)
-		batches[i] = Batch{ID: id, Registered: m.PolicyIdentity, Order: uint64(i + 1), Clock: 100000 + int64(shape.points)*shape.step, Points: rows}
+		batches[i] = Batch{ID: id, Registered: m, Order: uint64(i + 1), Clock: 100000 + int64(shape.points)*shape.step, Points: rows}
 	}
 	rng.Shuffle(len(batches), func(i, j int) { batches[i], batches[j] = batches[j], batches[i] })
 	for i := range batches {

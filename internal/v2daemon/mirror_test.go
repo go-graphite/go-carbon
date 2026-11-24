@@ -68,7 +68,7 @@ func TestMirrorAtDrain(t *testing.T) {
 	s.Producers[0].mirror = func(int, []v2core.Batch) error { return sentinel }
 	app[0].Order = s.Producers[0].applyOrder + 1
 	app[0].Name, app[0].Policy = "", nil
-	app[0].Registered, err = s.Producers[0].RegisterApplication("mirror.metric", policy)
+	app[0].Registered, app[0].LocalID, err = s.Producers[0].RegisterApplication("mirror.metric", policy)
 	if err != nil {
 		t.Fatal(err)
 	}
