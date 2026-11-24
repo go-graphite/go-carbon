@@ -18,6 +18,9 @@ func (o *coreOwner) ensureHydrated() error {
 				o.failure.CompareAndSwap(nil, &coreFailure{err: o.hydrateErr})
 			}
 		}
+		if o.hydrateErr == nil {
+			o.hydrated.Store(true)
+		}
 	})
 	return o.hydrateErr
 }
@@ -53,4 +56,17 @@ func deferOwnerRollups(db *pebble.DB, dict *v2dict.Dict) (bool, error) {
 		eligible = eligible && descriptorByID(d)
 	}
 	return found && eligible, errors.Join(it.Error(), it.Close())
+}
+
+// hydrateForMaintenance admits one background recovery per engine. Busy owners
+// retry on their next maintenance tick; request, publication and seal fences do
+// not queue behind unrelated background owners.
+func (o *coreOwner) hydrateForMaintenance() (bool, error) {
+	if gate := o.backgroundHydration; gate != nil {
+		if !gate.TryLock() {
+			return false, nil
+		}
+		defer gate.Unlock()
+	}
+	return true, o.ensureHydrated()
 }

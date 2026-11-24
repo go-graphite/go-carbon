@@ -214,9 +214,11 @@ func coreWake(wake chan struct{}) {
 }
 
 type coreOwner struct {
-	hydrateOnce sync.Once
-	hydrate     func() error
-	hydrateErr  error
+	hydrateOnce         sync.Once
+	hydrate             func() error
+	hydrateErr          error
+	hydrated            atomic.Bool
+	backgroundHydration *sync.Mutex
 
 	ready          []atomic.Uint64
 	work           chan struct{}
@@ -413,6 +415,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 	e.owners = make([]*coreOwner, cfg.Shards)
 	// Limit concurrent Pebble opens, rollup reconstruction and part validation.
 	// No owner/merge/GC workers start until every owner has opened successfully.
+	var backgroundHydration sync.Mutex
 	var opening errgroup.Group
 	opening.SetLimit(min(48, runtime.GOMAXPROCS(0)))
 	for s := 0; s < cfg.Shards; s++ {
@@ -547,6 +550,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 				r.db, r.identities = db, identities
 				var copied bool
 				if lazy {
+					o.backgroundHydration = &backgroundHydration
 					o.hydrate = func() error {
 						if o.stage != nil {
 							o.stage("owner-hydration")
@@ -556,6 +560,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 					}
 				} else {
 					copied, err = r.recover()
+					o.hydrated.Store(err == nil)
 				}
 				if err != nil {
 					return err
@@ -1154,8 +1159,9 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	// startSeal freezes the head and seals it in the background. The owner
 	// keeps admitting rows into a new head and publishing it on its own cadence.
 	// Callers ensure no seal is in flight.
+	// Empty cold seals leave recovery to demand or paced maintenance.
 	startSeal := func() error {
-		if slices.Equal(pending, o.meta.Cursors) && !o.maintenance && !l0Loaded {
+		if slices.Equal(pending, o.meta.Cursors) && (!o.maintenance || !o.hydrated.Load()) && !l0Loaded {
 			deadline = time.Now().Add(sealInterval)
 			return nil
 		}
@@ -1222,7 +1228,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		if err := awaitFlight(); err != nil {
 			return err
 		}
-		if slices.Equal(pending, o.meta.Cursors) && !o.maintenance && !l0Loaded {
+		if slices.Equal(pending, o.meta.Cursors) && (!o.maintenance || !o.hydrated.Load()) && !l0Loaded {
 			return nil
 		}
 		// Publish the last intake tail before synchronous rollup/disk work. A
@@ -1363,6 +1369,9 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			found = true
 			if p.operation != nil {
 				err := failure
+				if err == nil {
+					err = o.ensureHydrated()
+				}
 				if err == nil {
 					err = flush()
 				}
@@ -1520,7 +1529,8 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			// Keep inactivity detection independent of the larger seal threshold.
 			// The application callback requests its existing intake fence before
 			// allowing expiry; only an allowed expiry or new metadata needs a seal.
-			if err := o.ensureHydrated(); err != nil {
+			ready, err := o.hydrateForMaintenance()
+			if err != nil {
 				failure = err
 				o.failure.CompareAndSwap(nil, &coreFailure{err: err})
 			}
@@ -1529,7 +1539,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			if r.now != nil {
 				now = r.now()
 			}
-			due := failure == nil && ((r.expire != nil && r.expiryDue(now)) || r.pendingMetadataDue(&pend, o.lookup))
+			due := ready && failure == nil && ((r.expire != nil && r.expiryDue(now)) || r.pendingMetadataDue(&pend, o.lookup))
 			if due {
 				failure = flush()
 				if failure != nil {

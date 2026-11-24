@@ -292,12 +292,13 @@ func readL0(files []string) ([]coreBatch, error) {
 
 // LoadL0 reads every L0 run file present into its owner's head, as published
 // rows the next seal covers and whose files it then unlinks. Call it once,
-// after the catalog that resolves application handles is open and before
-// intake. keep sees every loaded application with its owner: callers continue
+// before intake. The callback may open the catalog resolving each kept
+// application; an error leaves this owner's files untouched. keep sees each
+// loaded application with its owner: callers continue
 // each producer's order above them and drop the ones a durable seal already
 // covers (a kill between a seal's commit and its unlink), which the rollup
 // reducer would refuse as not after its frontier.
-func (e *coreEngine) LoadL0(keep func(owner int, b *Batch) bool) error {
+func (e *coreEngine) LoadL0(keep func(owner int, b *Batch) (bool, error)) error {
 	if !e.cfg.L0 {
 		return nil
 	}
@@ -312,7 +313,17 @@ func (e *coreEngine) LoadL0(keep func(owner int, b *Batch) bool) error {
 			return err
 		}
 		if keep != nil {
-			batches = slices.DeleteFunc(batches, func(b coreBatch) bool { return !keep(owner, &b) })
+			kept := batches[:0]
+			for i := range batches {
+				ok, err := keep(owner, &batches[i])
+				if err != nil {
+					return err
+				}
+				if ok {
+					kept = append(kept, batches[i])
+				}
+			}
+			batches = kept
 		}
 		// Like producer packets, rows carry every point and batches share them.
 		n := 0

@@ -155,3 +155,96 @@ func TestOwnerHydrationSIGKILL(t *testing.T) {
 		}
 	}
 }
+
+// Expiry maintenance must not hydrate every cold owner in one burst. Queries
+// still validate their own owners while that one background recovery is paused.
+func TestOwnerHydrationPacesMaintenance(t *testing.T) {
+	v2part.IDKeys.Store(true)
+	defer v2part.IDKeys.Store(false)
+	cfg := coreTestConfig()
+	cfg.Shards, cfg.Owners, cfg.Producers = 8, 8, 1
+	cfg.Rollups, cfg.SealInterval = true, 80*time.Millisecond
+	root := t.TempDir()
+	e, err := Open(root, cfg, Hooks{IDKeys: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, cfg.Shards)
+	for i := 0; ; i++ {
+		name := fmt.Sprintf("hydrate.pacing.metric%d", i)
+		owner := int(v2part.Route(v2part.ID(name))) % cfg.Shards
+		names[owner] = name
+		done := true
+		for _, n := range names {
+			done = done && n != ""
+		}
+		if done {
+			break
+		}
+	}
+	for i, name := range names {
+		_, policy := rollupTestPolicy(t, name, "1s:1d,1m:30d", sealrollup.Average, .5)
+		id := uint64(i + 1)
+		if err = e.AppendBatches(0, []Batch{{ID: id, Order: id, Clock: 1794700800, Policy: policy, Points: []Row{{ID: id, Time: 1794700790, Bits: math.Float64bits(float64(i)), Seq: 1}}}}, id, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{}, cfg.Shards)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	e, err = Open(root, cfg, Hooks{IDKeys: true, Now: func() time.Time { return time.Unix(1, 0) },
+		Expire:    func(RollupPolicy, RollupMetadata, time.Time) bool { return false },
+		ExpiryTTL: func(RollupPolicy, time.Time) (time.Duration, time.Time) { return time.Hour, time.Time{} },
+		Stage: func(stage string) {
+			if stage == "owner-hydration" {
+				entered <- struct{}{}
+				<-release
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		unblock()
+		if err = e.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("maintenance never hydrated")
+	}
+	select {
+	case <-entered:
+		t.Fatal("background hydration burst exceeded one owner")
+	case <-time.After(200 * time.Millisecond):
+	}
+	done := make(chan error, cfg.Shards)
+	for _, o := range e.owners {
+		go func() { done <- o.gc.inventory.AwaitHydration(context.Background()) }()
+	}
+	for i := 1; i < cfg.Shards; i++ {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("demand queued behind unrelated background hydration")
+		}
+	}
+	unblock()
+	for range cfg.Shards {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, o := range e.owners {
+		if len(o.rollups.ids) != 1 {
+			t.Fatalf("owner %d hydrated %d identities", i, len(o.rollups.ids))
+		}
+	}
+}

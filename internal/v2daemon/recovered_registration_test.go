@@ -52,6 +52,12 @@ func TestRecoveredRegistrationReusesBoundHandle(t *testing.T) {
 	if len(p.applications) > 1 && p.applications[1] != nil {
 		t.Fatal("fixture already has a producer handle")
 	}
+	if p.catalog != nil {
+		t.Fatal("sealed restart eagerly opened producer catalog")
+	}
+	if err := p.openCatalog(); err != nil {
+		t.Fatal(err)
+	}
 	want := s.Core.ApplicationPolicy(NumericID(1, 0, 1))
 	if want == nil {
 		t.Fatal("catalog recovery did not bind the identity")
@@ -139,6 +145,19 @@ func TestRecoveredRegistrationReusesBoundHandle(t *testing.T) {
 	}
 	p = s.Producers[0]
 	checkSealed()
+	if p.catalog != nil {
+		t.Fatal("sealed read opened the producer catalog")
+	}
+	coldReceiver := &applicationOwner{p: p, resolve: func(string) ([]byte, error) {
+		t.Fatal("cold recovered intake repeated admission")
+		return nil, nil
+	}}
+	if err := coldReceiver.Append([]string{name}, nil, probePoints(1), nil, 1030); err != nil {
+		t.Fatal(err)
+	}
+	if p.catalog == nil || p.pendingRows != 1 || coldReceiver.names.Len() != 1 {
+		t.Fatal("cold intake did not open and reuse the persisted catalog")
+	}
 }
 
 // A live classic writer still needs current-policy validation at admission.
