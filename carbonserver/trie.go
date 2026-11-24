@@ -1555,6 +1555,7 @@ type Quota struct {
 
 	DroppingPolicy   QuotaDroppingPolicy
 	StatMetricPrefix string
+	OverQuota        string
 }
 
 func (q *Quota) String() string {
@@ -2554,6 +2555,10 @@ func (*trieIndex) metricName(node *trieNode, name string) string {
 	if quota, ok := node.meta.Load().(*dirMeta).quota.Load().(*Quota); ok && quota != nil {
 		prefix = quota.StatMetricPrefix
 	}
+	return quotaMetricName(prefix, name)
+}
+
+func quotaMetricName(prefix, name string) string {
 	name = strings.ReplaceAll(name, ".", "-")
 	// WHY: on linux, the maximum filename length is 255, keeping 5 here for
 	// file extension.

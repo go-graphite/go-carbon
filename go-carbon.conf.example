@@ -540,6 +540,16 @@ store-encoding = "legacy"
 # store-cold-pack-max-compaction-debt = 67108864 # pause above this Pebble debt
 
 
+# Opt-in quota cleanup for pebble-chunk namespaces with
+# over-quota = delete-newest in storage-quotas.conf. Requires concurrent realtime
+# trie quotas, completed file migration and no rollback mirror. Uses the
+# expiration scheduling, worker,
+# scan/delete rate, pass limit and pressure settings below; TTL may remain 0s.
+# Dry-run defaults true and is independent of store-expiration-dry-run.
+# See doc/quotas.md for ordering limits, monitoring, reload and rollback.
+quota-trim-enabled = false
+quota-trim-dry-run = true
+
 # Automatically remove idle metrics from pebble-chunk storage. "0s" disables
 # the global policy. Matching entries in store-expiration-file override this
 # value; a matching "0s" explicitly keeps a metric.

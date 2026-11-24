@@ -182,6 +182,9 @@ func sharedStorePath(cfg *Config) string {
 }
 
 func validateStorageConfig(cfg *Config) error {
+	if err := validateQuotaTrimConfig(cfg); err != nil {
+		return err
+	}
 	if cfg.Whisper.StoreTimeBucketsRelayoutReclaimBytes <= 0 {
 		return errors.New("store-time-buckets-relayout-reclaim-bytes must be positive")
 	}

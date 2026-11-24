@@ -181,6 +181,8 @@ type whisperConfig struct {
 	StoreExpirationFilename      string                           `toml:"store-expiration-file"`
 	StoreExpirationCheckInterval *Duration                        `toml:"store-expiration-check-interval"`
 	StoreExpirationScanRate      int                              `toml:"store-expiration-scan-rate"`
+	QuotaTrimEnabled             bool                             `toml:"quota-trim-enabled"`
+	QuotaTrimDryRun              bool                             `toml:"quota-trim-dry-run"`
 	StoreExpirationDryRun        bool                             `toml:"store-expiration-dry-run"`
 	StoreExpirationDeleteWorkers int                              `toml:"store-expiration-delete-workers"`
 	StoreExpirationDeleteRate    int                              `toml:"store-expiration-delete-rate"`
@@ -514,6 +516,7 @@ func NewConfig() *Config {
 			FLock:                        false,
 			HashFilenames:                true,
 
+			QuotaTrimDryRun:              true,
 			StoreExpiration:              &Duration{0},
 			StoreExpirationCheckInterval: &Duration{time.Hour},
 			StoreExpirationScanRate:      100_000,
@@ -768,6 +771,7 @@ func (c *Config) getCarbonserverQuotas(reportFrequency time.Duration) (quotas []
 			Throughput:       q.Throughput * minutes,
 			DroppingPolicy:   carbonserver.ParseQuotaDroppingPolicy(q.DroppingPolicy),
 			StatMetricPrefix: q.StatMetricPrefix,
+			OverQuota:        q.OverQuota,
 		})
 	}
 

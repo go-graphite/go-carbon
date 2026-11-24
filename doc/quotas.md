@@ -146,3 +146,140 @@ Rule application does not wait for a disk scan. Quota/usage metrics still follow
 Enabling quota support for the first time, or changing
 `carbonserver.quota-usage-report-frequency`, still requires a restart. A reload
 signal received during startup is queued until recovery finishes.
+
+## Trimming namespaces that already exceed their metric cap
+
+For `pebble-chunk` stores, a rule can opt into removing stored names until the
+matched namespace reaches its `metrics` cap:
+
+```ini
+[applications.example]
+metrics = 50,000
+over-quota = delete-newest
+stat-metric-prefix = "cleanup."
+```
+
+`over-quota` accepts `none` (the default) or `delete-newest`. The latter requires
+a positive `metrics` value and implies `dropping-policy = new`; explicitly
+combining it with `dropping-policy = none` is an error. Ordinary ingestion of
+unknown names is therefore blocked while at or above the cap, including during
+dry-run. Rules without this option keep their existing behavior. A glob such as
+`[applications.*]` gives **each matched namespace** its own cap; the last rule
+matching the same node wins, as with ordinary quotas. A child without the
+option still belongs to an opted-in ancestor's subtree; it is not an exclusion
+from that ancestor's cap.
+
+There is also a global opt-in in `go-carbon.conf`:
+
+```toml
+[whisper]
+quota-trim-enabled = true          # default false
+quota-trim-dry-run = true          # default true; set false to delete
+store-expiration-check-interval = "1h"
+store-expiration-scan-rate = 100000
+store-expiration-delete-rate = 100
+store-expiration-delete-workers = 8
+store-expiration-max-deletes = 10000
+```
+
+This requires an enabled persister, `quotas-file`, and enabled carbonserver with
+`trie-index`, `concurrent-index`, and a positive `realtime-index`. File storage
+and rollback mirroring are rejected. File migration must have completed so
+discovery is owned by the store catalog. The global flags reload via SIGHUP. Rules,
+including adding/removing `over-quota`, also reload through the quota file poller.
+A running pass finishes its captured rule snapshot; removing the option takes
+effect on the next pass. SIGHUP joins the old worker before replacing it. Disabling
+`quota-trim-enabled` through SIGHUP cancels and joins the active worker.
+
+### Selection and safety
+
+The worker refreshes the index and materializes the same quota assignments that
+enforce ingestion. It counts committed catalog names rather than trusting the
+periodically refreshed usage counter. When there is excess, a second paced
+catalog pass retains at most `store-expiration-max-deletes` newest candidates in
+a heap. Memory is bounded by the matched namespace count plus this candidate
+limit; catalog scans themselves visit the entire catalog. Names outside opted-in
+namespaces are ignored. The pass reserves each overlapping opted-in namespace's
+excess before dispatch, so trimming cannot take those namespaces below their
+caps. A child at its cap is protected even if its parent remains over quota;
+contradictory parent/child caps may therefore prevent convergence.
+
+There is **no durable metric creation timestamp**. The trie has `firstSeenAt`
+(persisted for file indexes by file-list cache v2), but chunk catalog indexing
+passes zero: mutable entries use index-observation time and mapped entries can
+leave it unset. Rebuilding the index does not preserve a reliable creation time. Store `LastUpdate` is write activity, not creation, and oldest retained points
+are affected by retention and backfill. Trimming instead orders by **descending
+store catalog ID**, then descending name for a deterministic tie break. Parallel
+batch completion can differ from selection order. Ordinary
+creation allocates increasing IDs and ordinary writes preserve them. This is
+local allocation order, not the original age of the data: migration, import,
+restore, native ID reservations/replacement, and deleting/recreating a name can
+make an old logical metric look new. Review dry-run before enabling deletion,
+especially after migration or restore.
+
+Candidates enter the existing metric expiration executor: the same partitioned
+delete workers, batches of at most 32, one delete-rate budget, cache/in-flight
+write checks, compaction pressure guards, store identity/generation/revision
+fence, atomic deletion receipts, tombstone flush, and index refresh notification.
+Each quota receipt identifies the first matching opted-in namespace policy
+(in sorted namespace order) separately from TTL
+expiration evidence; they do not grant a TTL-expiration exemption to replication.
+Replication and administrative imports can reintroduce removed names, which
+subsequent passes will consider again.
+Deleted catalog names leave discovery and quota usage when the existing index
+refresher runs. Already cached query responses retain their normal cache TTL.
+
+A new committed write invalidates the candidate. A point arriving after the
+last cache check may race deletion; as for expiration, the cache retains the
+point and the persister requeues/recreates a missing metric. Such recreation can
+temporarily restore an excess name. Pending writes, conflicts, or pressure cause
+skips; the next pass retries rather than deleting older replacements in the same
+pass. Independent administrative deletion and TTL expiration retain their own
+semantics; the metric cap is not a minimum retention guarantee for those paths.
+
+Trimming runs first, followed by any configured TTL expiration, sharing the
+configured maximum successful deletions per pass. Both phases use the expiration
+scan/delete rate and pressure settings. With the defaults, trimming attempts at
+most 10,000 names per pass and paces deletion at 100 names/s across all workers.
+Dry-run logs and counts the bounded selection without initializing activity,
+writing receipts, or deleting names. `quota-trim-dry-run` is independent of
+`store-expiration-dry-run`, which controls only TTL expiration. Enabling trimming
+does not enable a TTL policy.
+
+### Monitoring and rollback
+
+Under `common.graph-prefix`, the collector emits interval counters:
+
+```text
+quota.trim.candidates
+quota.trim.deleted
+quota.trim.skipped
+quota.trim.errors
+quota.trim.candidates.cleanup.applications-example
+quota.trim.deleted.cleanup.applications-example
+quota.trim.skipped.cleanup.applications-example
+```
+
+The suffix follows quota stat naming: `stat-metric-prefix` followed by the
+materialized namespace with dots replaced by hyphens (root uses `root`; long
+names use the same shortening/hash rule as quota metrics). Overlapping rules
+count a candidate under every affected namespace; global counters count each
+name once. Candidates are the planned names for that pass, capped by the pass
+limit. Skipped means planned but not deleted, including every dry-run candidate.
+Per-namespace logs also include the full excess count, cap, rule, dry-run flag,
+and up to ten candidate names.
+Errors are logged at error level; watch `quota.trim.errors`,
+`storage.expiration.errors`, `persister.write_failed_points_total` (no increase),
+and index refresh errors.
+
+Start on one store with dry-run, inspect the selected count and age-order caveats,
+then set `quota-trim-dry-run = false` and SIGHUP. Watch deleted counts and
+`usage.metrics.<suffix>` converge toward `quota.metrics.<suffix>`, with write
+errors remaining zero. To stop, set `quota-trim-enabled = false` and SIGHUP; remove
+`over-quota` to remove the policy as well. Keep `dropping-policy = new` explicitly
+if new-name admission must remain blocked. Stopping does not restore deleted
+data; recovery requires a backup or another replica.
+
+Caps are **per store**: use the namespace quota divided by its replica factor for
+each host's cap. If a namespace is stored in two clusters, configure a cap in each
+cluster; this feature does not coordinate a cross-cluster quota.

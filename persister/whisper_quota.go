@@ -18,6 +18,7 @@ type Quota struct {
 	Throughput       int64
 	DroppingPolicy   string
 	StatMetricPrefix string
+	OverQuota        string
 }
 
 type WhisperQuotas []Quota
@@ -76,6 +77,21 @@ func ReadWhisperQuotas(filename string) (WhisperQuotas, error) {
 			quota.DroppingPolicy = v
 		default:
 			return nil, fmt.Errorf("[persister] Unknown dropping-policy %q for [%s]", v, section["name"])
+		}
+
+		switch v := section["over-quota"]; v {
+		case "", "none":
+		case "delete-newest":
+			if quota.Metrics <= 0 {
+				return nil, fmt.Errorf("[persister] over-quota requires a positive metrics cap for [%s]", quota.Pattern)
+			}
+			if quota.DroppingPolicy == "none" {
+				return nil, fmt.Errorf("[persister] over-quota = delete-newest conflicts with dropping-policy = none for [%s]", quota.Pattern)
+			}
+			quota.OverQuota = v
+			quota.DroppingPolicy = "new"
+		default:
+			return nil, fmt.Errorf("[persister] Unknown over-quota %q for [%s]", v, quota.Pattern)
 		}
 
 		quota.StatMetricPrefix = strings.TrimPrefix(section["stat-metric-prefix"], ".")
