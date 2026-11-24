@@ -18,7 +18,6 @@ import (
 
 	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/carbonserver"
-	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2core"
 	"github.com/go-graphite/go-carbon/internal/v2daemon"
 	"github.com/go-graphite/go-carbon/internal/v2index"
@@ -398,27 +397,7 @@ func (app *App) startV2() error {
 	if err != nil {
 		return err
 	}
-	resolve := func(name string) ([]byte, error) {
-		schema, ok := c.Whisper.Schemas.Match(name)
-		if !ok {
-			return nil, fmt.Errorf("no v2 schema for %q", name)
-		}
-		agg := c.Whisper.Aggregation.Match(name)
-		cfg := sealrollup.Config{Method: sealrollup.Method(agg.AggregationMethod()), XFilesFactor: float32(agg.XFilesFactor())}
-		for _, a := range schema.Retentions {
-			cfg.Archives = append(cfg.Archives, sealrollup.Archive{Step: int64(a.SecondsPerPoint()), Count: int64(a.NumberOfPoints())})
-		}
-		policy := v2read.Metric{AggregationMethod: agg.AggregationMethod().String(), XFilesFactor: cfg.XFilesFactor}
-		for _, archive := range cfg.Archives {
-			policy.Archives = append(policy.Archives, v2read.Archive{Step: archive.Step, Points: archive.Count})
-		}
-		if mode != v2Shadow {
-			if err := app.Carbonserver.ValidateV2UnionPolicy(name, policy); err != nil {
-				return nil, err
-			}
-		}
-		return v2core.EncodeRollupPolicy(v2core.RollupPolicy{Name: v2part.ID(name), Group: "local", Config: cfg})
-	}
+	resolve := app.v2PolicyResolver(mode, classicNames)
 	var throttle func(*points.Points, bool) bool
 	if v.quotas != nil {
 		throttle = v.quotas.ShouldThrottleMetric
