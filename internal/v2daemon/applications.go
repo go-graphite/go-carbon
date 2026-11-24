@@ -44,13 +44,18 @@ func (p *Producer) RegisterApplication(name string, policy []byte) (*v2core.Appl
 	if err != nil {
 		return nil, 0, err
 	}
+	return p.application(id)
+}
+
+// application reuses the handle the catalog binding has already validated and
+// installed in this engine epoch, including during recovery.
+func (p *Producer) application(id uint64) (*v2core.ApplicationPolicy, uint64, error) {
 	if id < uint64(len(p.applications)) && p.applications[id] != nil {
 		return p.applications[id], id, nil
 	}
-	name, _ = p.catalog.Key(id) // the catalog's own string, not the caller's
-	registered, err := p.engine.RegisterApplicationPolicy(NumericID(id, p.index, p.count), name, policy)
-	if err != nil {
-		return nil, 0, err
+	registered := p.engine.ApplicationPolicy(NumericID(id, p.index, p.count))
+	if registered == nil {
+		return nil, 0, errors.New("application catalog has no bound policy")
 	}
 	for uint64(len(p.applications)) <= id {
 		p.applications = append(p.applications, nil) // catalog IDs are dense
