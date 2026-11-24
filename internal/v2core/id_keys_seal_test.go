@@ -120,6 +120,19 @@ func TestIDKeyedSealDifferential(t *testing.T) {
 						for i := range want {
 							want[i].Correction = false
 						}
+						// Run maxima depend on part/run boundaries, which can
+						// differ after merging only the ID-keyed store. The
+						// single-archive contract preserves winners, not row clocks.
+						if schema == "1s:1h" {
+							for _, records := range [][]sealrollup.Record{got, want} {
+								for i := range records {
+									if records[i].Order == 0 || records[i].Order > uint64((epoch+1)*names) || records[i].Sample.Sequence != records[i].Order {
+										t.Fatalf("invalid representative order %+v", records[i])
+									}
+									records[i].Order, records[i].Sample.Sequence = 0, 0
+								}
+							}
+						}
 						if !reflect.DeepEqual(got, want) {
 							t.Fatalf("epoch %d %s: ID-keyed winners differ\ngot=%+v\nwant=%+v", epoch, name, got, want)
 						}

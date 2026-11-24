@@ -111,7 +111,13 @@ func verifyFixedRollups(reader *v2core.Engine, f Fixture, names []string) (int, 
 				stamp, ok := expected[[2]int64{int64(record.Archive), record.Slot}]
 				lastRound := min(f.Rounds-1, int(stamp+p.Config.Archives[record.Archive].Step-1-1794700799))
 				order := uint64(lastRound*width + local + 1)
-				if !ok || record.Sample.Time != stamp || record.Sample.Bits != math.Float64bits(fixturePoint(id, 0).Value) || record.Order != order {
+				orderOK := record.Order == order
+				if len(p.Config.Archives) == 1 {
+					// A certified run stores its maximum as a representative,
+					// bounded by the exact row clock and this name's frontier.
+					orderOK = record.Order >= order && record.Order <= m.Frontier.Order
+				}
+				if !ok || record.Sample.Time != stamp || record.Sample.Bits != math.Float64bits(fixturePoint(id, 0).Value) || !orderOK || record.Sample.Sequence != record.Order {
 					return fmt.Errorf("archive replacement mismatch id%s a%d slot%d got%+v wantstamp%d order%d", strconv.Itoa(id), record.Archive, record.Slot, record, stamp, order)
 				}
 			}
