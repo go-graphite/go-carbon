@@ -5,6 +5,7 @@ resumable command. Build with
 `GOTOOLCHAIN=go1.27.0 GOFLAGS=-mod=vendor go build ./tool/storectl`.
 `storectl --version` reports the release build revision (or the Go VCS stamp).
 The owning donor and receiver daemons must also contain the native engine.
+A stopped donor can instead use `serve-readonly` (below).
 
 ## How it works
 
@@ -105,6 +106,67 @@ resolver (search domains apply; IPv4 preferred) before sending it to the
 target, and logs an `endpoint_resolved` event per source. An unresolvable
 name stops the run with an error naming the host. Addresses and `https`
 origins are sent unchanged.
+
+## Copy from a stopped store
+
+Keep go-carbon stopped on the source host. `serve-readonly` opens the existing
+store selected by `[whisper]` in its configuration (`storage-backend =
+"pebble-chunk"`, `store-dir`, or the normal `data-dir`/`store-encoding` default).
+It detects the recorded storage format and retains any incremental source
+binding. It never starts a carbon App, ingestion, expiration, maintenance, or
+metadata checkpointing. An existing `LOCK` is opened without creating or
+truncating it; an unavailable lock, unknown format, invalid binding, or missing
+JWT secret makes startup fail. No writable-open fallback exists.
+
+On the stopped host, use a separate port:
+
+```sh
+storectl serve-readonly --config /path/to/go-carbon.conf --listen 0.0.0.0:4243 &
+source_pid=$!
+```
+
+The source requires `[buckyd] auth-jwt-secret-file`. Use the same secret for the
+controller and live target, and authorize the stopped host's address in the
+live target's `transfer-sources` (or ring nodes), as for any donor. The listener
+defaults to `127.0.0.1:4243`; use a reachable bind address for a remote target.
+
+On the ops runner, prepare the byte-sorted name list and run the standard sync:
+
+```sh
+LC_ALL=C sort -u names.txt > sorted-names.txt
+storectl sync --names sorted-names.txt --source http://stopped-host:4243 \
+  --to http://live-host:4242 --jwt-secret /path/to/jwt-secret \
+  --state ./stopped-store-sync
+```
+
+The live target keeps its normal ingest service and carbonserver. Source
+metadata and verification point reads use the read-only listener automatically;
+no carbonserver is needed on the stopped host. Native exports use one stream at
+a time to bound source scratch memory; general reads retain buckyd admission.
+The existing sync retention and
+settle defaults still apply. Source exports do not require free space for SST
+creation; live targets retain their normal disk admission checks.
+
+After sync succeeds, stop the source listener in its original shell:
+
+```sh
+kill -TERM "$source_pid"
+wait "$source_pid"
+```
+
+SIGINT/SIGTERM cancels exports, joins requests, releases in-memory snapshot pins,
+and closes the store without a checkpoint. Every source request requires a
+buckyd JWT with the root read grant. The only exposed operations are:
+
+- `GET /v1/transfer/status`, `/v1/transfer/list`, `/v1/native/capabilities`;
+- `POST /v1/transfer/export`, `/v1/transfer/digest`, `/v1/native/source`,
+  `/v1/native/export`, plus exact-name v3 `/info/` and `/render/` reads;
+- `DELETE /v1/native/source/ID` to release an in-memory pin.
+
+All other paths/methods, including imports, pulls, metric mutations, deletion,
+store-copy and maintenance, return 405 after authorization (403 without a valid
+root read JWT). The store's read-only filesystem also rejects writes beneath
+the HTTP layer, including WAL, manifest, options, and digest-cache writes.
 
 ## Controller progress metrics
 

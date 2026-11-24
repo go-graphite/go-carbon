@@ -129,7 +129,7 @@ func (s *Store) sumDigest(ctx context.Context, name string, from, until int, ver
 	if err != nil {
 		return nil, err
 	}
-	if len(io.pending) != 0 || io.reset {
+	if !s.readOnly && (len(io.pending) != 0 || io.reset) {
 		// Avoid holding a writer stripe during the expensive first read.
 		unlock := s.lockMetricMutation(name)
 		defer unlock()

@@ -77,6 +77,7 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 		hostname, _ := os.Hostname()
 		_ = json.NewEncoder(w).Encode(struct {
 			chunkstore.Stats
+			ReadOnlySource         bool
 			MaxTransfers           int
 			L0StopWrites           int64
 			MaxBodyBytes           int64
@@ -88,7 +89,7 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 			StagedCopyVerification bool
 			Sync                   bool
 			SyncRecover            bool // /v1/transfer/sync accepts Recover
-		}{s.store.Stats(), s.MaxTransfers(), s.store.TransferL0StopWrites(), s.config.MaxBodyBytes, s.store.TransferFormat(), 1, hostname, runtime.GOMAXPROCS(0), true, true, true, true})
+		}{s.store.Stats(), s.store.ReadOnly(), s.MaxTransfers(), s.store.TransferL0StopWrites(), s.config.MaxBodyBytes, s.store.TransferFormat(), 1, hostname, runtime.GOMAXPROCS(0), true, true, true, true})
 		return
 	}
 	if !s.acquireTransfer() {

@@ -169,7 +169,11 @@ func New(config Config, metricStore *chunkstore.Store) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(config.TmpDir, 0750); err != nil {
+	if metricStore.ReadOnly() {
+		if config.JWTSecretFile == "" || config.WaitForJWTSecret {
+			return nil, errors.New("read-only source requires an available auth-jwt-secret-file")
+		}
+	} else if err := os.MkdirAll(config.TmpDir, 0750); err != nil {
 		return nil, fmt.Errorf("create buckyd temporary directory: %w", err)
 	}
 	secret, err := readSecret(config.JWTSecretFile)
@@ -566,6 +570,10 @@ func firstError(current, candidate error) error {
 }
 func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
+	if s.store != nil && s.store.ReadOnly() {
+		mux.HandleFunc("/info/", s.sourceInfo)
+		mux.HandleFunc("/render/", s.sourceFetch)
+	}
 	mux.HandleFunc("/metrics", s.list)
 	mux.HandleFunc("/metrics/", s.metric)
 	mux.HandleFunc("/hashring", s.hashring)
@@ -626,6 +634,16 @@ func (s *Service) Handler() http.Handler {
 				<-cancelDone
 			}
 		}()
+		if s.store != nil && s.store.ReadOnly() {
+			if err := s.allowedRoot("read", r); err != nil {
+				writeError(w, err, http.StatusForbidden)
+				return
+			}
+			if !readOnlySourceRoute(r) {
+				http.Error(w, "read-only source", http.StatusMethodNotAllowed)
+				return
+			}
+		}
 		mux.ServeHTTP(&restartResponse{ResponseWriter: w, ctx: serviceCtx}, r.WithContext(ctx))
 	})
 }
