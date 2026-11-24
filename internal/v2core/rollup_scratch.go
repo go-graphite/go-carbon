@@ -11,8 +11,8 @@ import (
 // bitset, stages, per-row samples and batches, lane records and part outputs. A planner holds one only
 // between planParts and Commit/Abort and returns it to a bounded shared cache, so
 // retained capacity follows the seals in flight instead of the high-water
-// capacity of every owner. Owner seal deadlines are staggered, so few owners
-// plan at once. VictoriaMetrics pools its in-memory part buffers the same way.
+// capacity of every owner. At most eight plans own these buffers at once,
+// including while a plan waits for dictionary durability or publication.
 //
 // Per-owner state (metrics, ranks, history window caches) never moves here.
 type rollupScratch struct {
@@ -40,12 +40,14 @@ type rollupLaneScratch struct {
 
 // Keep a small idle working set across GC cycles. sync.Pool can discard these
 // large buffers while owners still need them every seal, forcing allocation
-// and another GC cycle. Retain at most eight idle sets; extra concurrent
-// seals allocate normally and never wait for a buffer.
+// and another GC cycle. Bound both idle capacity and active working sets:
+// dictionary backpressure can otherwise make all staggered owners overlap.
 var rollupScratchPool = make(chan *rollupScratch, 8)
+var rollupScratchSlots = make(chan struct{}, cap(rollupScratchPool))
 
 // takeScratch adopts a pooled working set for the seal that is starting.
 func (r *coreRollups) takeScratch() {
+	rollupScratchSlots <- struct{}{}
 	var s *rollupScratch
 	select {
 	case s = <-rollupScratchPool:
@@ -81,6 +83,7 @@ func (r *coreRollups) takeLaneScratch() {
 // it after Commit/Abort, when no plan segment, stage or record is referenced.
 func (r *coreRollups) returnScratch() {
 	s := r.scratch
+	borrowed := s != nil
 	if s == nil {
 		s = &rollupScratch{}
 	}
@@ -105,5 +108,8 @@ func (r *coreRollups) returnScratch() {
 	select {
 	case rollupScratchPool <- s:
 	default:
+	}
+	if borrowed {
+		<-rollupScratchSlots
 	}
 }
