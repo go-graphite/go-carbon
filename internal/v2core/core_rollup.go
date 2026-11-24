@@ -827,13 +827,14 @@ func (e *rollupScanEntry) addMetadata(identities *PolicyCatalog, k partsformat.K
 	return nil
 }
 
-// finish validates the recovered envelope. Samples remain in immutable parts.
+// finish validates the recovered identity and scalars without encoding another
+// policy definition. addMetadata already interned the envelope's policy.
 func (e *rollupScanEntry) finish(name partsformat.ID) (RollupMetadata, error) {
 	if e.identity == nil {
 		return RollupMetadata{}, fmt.Errorf("missing rollup metadata for %s", name)
 	}
-	policy, meta := (&readMetricState{PolicyIdentity: e.identity, meta: e.meta}).metadataForName(string(name))
-	if (meta.Version < 1 || meta.Version > 4) || policy.Group != e.group || !e.identity.matchesName(string(name)) || meta.ID == 0 || meta.Frontier.Order == 0 {
+	meta := e.identity.metadataScalars(e.meta)
+	if (meta.Version < 1 || meta.Version > 4) || e.identity.policy.Group != e.group || !e.identity.matchesName(string(name)) || meta.ID == 0 || meta.Frontier.Order == 0 {
 		return meta, fmt.Errorf("missing rollup metadata for %s", name)
 	}
 	if meta.Version < 4 && meta.BaselineOrder > meta.Frontier.Order || (meta.Version == 1 && (meta.ResetOrder != 0 || meta.Expired)) || meta.Version < 4 && meta.ResetOrder > meta.Frontier.Order || (meta.Expired && meta.Version < 4 && meta.ResetOrder != meta.Frontier.Order) {
