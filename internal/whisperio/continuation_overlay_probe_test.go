@@ -41,13 +41,20 @@ type referencedProbeTemplate struct {
 
 var referencedProbeTemplates [2]referencedProbeTemplate
 
+// Keep real files and the multi-level layout without depending on host free space.
+type referencedProbeTestFS struct{ vfs.FS }
+
+func (referencedProbeTestFS) GetDiskUsage(string) (vfs.DiskUsage, error) {
+	return vfs.DiskUsage{}, vfs.ErrUnsupported
+}
+
 func buildReferencedProbeStore(root string, buckets bool) (int64, error) {
 	ctx := context.Background()
 	start := referencedProbeStart
 	stamp := start + referencedProbeHistory*10
 	clock := func() time.Time { return time.Unix(stamp+1, 0) }
 	dir, options := levelsBenchOptions(root, buckets, clock, false)
-	target, err := store.Open(dir, options)
+	target, err := store.Open(dir, options.WithFS(referencedProbeTestFS{vfs.Default}))
 	if err != nil {
 		return 0, err
 	}
@@ -163,7 +170,7 @@ func openReferencedProbeCodec(tb testing.TB, buckets bool, codec *ContinuationCo
 	if err := os.CopyFS(dir, os.DirFS(template)); err != nil {
 		tb.Fatal(err)
 	}
-	db, err := store.Open(dir, options)
+	db, err := store.Open(dir, options.WithFS(referencedProbeTestFS{vfs.Default}))
 	if err != nil {
 		tb.Fatal(err)
 	}
