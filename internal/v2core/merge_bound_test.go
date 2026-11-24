@@ -452,7 +452,7 @@ func versionWindows(t *testing.T, s *pebble.Snapshot, policy []byte, archive int
 	for _, start := range starts {
 		p, ok, err := sealrollup.OpenSlot(m.latest.schema(), archive, start, func(l int, first, last int64, from uint64) ([]sealrollup.Record, error) {
 			var recs []sealrollup.Record
-			err := index.eachPartRecord(ctx, m, index.metricParts(m), l, first, last, true, func(part *readPartMetric) bool {
+			err := index.eachPartRecord(ctx, name, m, index.metricParts(name, m), l, first, last, true, func(part *readPartMetric) bool {
 				return from > 0 && part.meta.Frontier.Order != 0 && part.meta.Frontier.Order < from
 			}, func(r sealrollup.Record, _ partOrigin) error {
 				recs = append(recs, r)

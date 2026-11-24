@@ -195,3 +195,49 @@ func TestCoreSealDeadlinesStaggerByOwner(t *testing.T) {
 		}
 	}
 }
+
+// Pending visibility has its own sub-second budget; a long seal interval
+// must not make the second admitted application wait for the next seal.
+func TestCorePublicationDefaultDeadline(t *testing.T) {
+	dir := t.TempDir()
+	db, err := pebble.Open(dir, &pebble.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := coreConfig{Producers: 1, Shards: 1, MaxRows: 1 << 20, PartitionSeconds: 60, SealInterval: time.Hour}
+	o := &coreOwner{db: db, dir: dir, cfg: cfg, sealRows: 1 << 20}
+	o.meta = coreFrontier{Version: 1, Config: cfg, Cursors: []uint64{0}}
+	o.publishFrontier(o.meta)
+	defer func() { o.pub.clear(); db.Close() }()
+	var visible uint64
+	o.batchHook = func(PendingView, uint64) error { return nil }
+	o.visible = func(v PendingView) {
+		v.Each(func(a *PendingApplication) bool { visible = max(visible, a.Order); return true })
+	}
+	q := newCoreQueue(coreQueueBytes)
+	o.queues = []*coreQueue{q}
+	poll := o.poller()
+	push := func(order uint64) {
+		rows := []row{{ID: 1, Time: int64(order), Bits: 1, Seq: order}}
+		if !q.tryPush(&corePacket{rows: rows, batches: []coreBatch{{ID: 1, Order: order, Clock: 1700000000, Points: rows}}, cursor: order}) {
+			t.Fatal("queue full")
+		}
+		poll()
+	}
+	push(1)
+	if visible != 1 {
+		t.Fatalf("first publication: %d", visible)
+	}
+	push(2)
+	if visible != 1 {
+		t.Fatal("publication no longer batches intake")
+	}
+	time.Sleep(600 * time.Millisecond)
+	poll()
+	if visible != 2 {
+		t.Fatalf("second application still invisible after the sub-second publication budget: %d", visible)
+	}
+	if o.parts.Load() != 0 {
+		t.Fatal("visibility required a seal")
+	}
+}

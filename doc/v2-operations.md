@@ -46,6 +46,18 @@ Go runtime still honors an explicit `GOMEMLIMIT`; this growth target does not
 bound RSS. File mappings, native allocations and filesystem page cache need separate
 accounting. Classic startup retains the runtime's GC growth setting.
 
+## Part identities
+
+`[v2] id-keys` defaults to `true`. Seals use vshard-local numeric IDs from
+the store's name dictionary, reducing repeated names in immutable parts.
+The dictionary remains the source of truth; requests carry their existing
+name through part routing and cursor selection without a global name cache.
+Existing name-keyed parts remain readable alongside ID-keyed parts.
+
+Set `id-keys = false` before creating a store to retain name-keyed seals.
+Once a store contains ID-keyed parts, keep ID keys enabled when reopening it.
+This setting is applied at process startup.
+
 ## Repeatable producer catalog measurements
 
 `TestNameCatalogScale` is opt-in. Compile once, then run create and recover in
@@ -224,12 +236,13 @@ per owner before original-batch and packet overhead. No merge policy changes. Ex
 When inactivity expiry is configured, its metadata check retains a separate
 one-second cadence; new metadata and due fenced expiry may force an earlier seal.
 
-Pending heads publish independently every second, including idle tails. The
+Pending heads publish independently every 500 ms, including idle tails. The
 last unpublished tail is also published before synchronous seal work starts. Fine
 and coarse reads combine pending original samples with sealed data; rollups
-are still computed exactly from fine samples at seal. The mandatory input log
-keeps its one-second fsync, so this changes replay work, not the durability
-window. A crash can now require replaying about ten seconds per owner instead
-of one, plus time spent sealing or queued behind storage; a size seal shortens
-that prefix. Measure replay time and buffered points during qualification.
+are still computed exactly from fine samples at seal. Each publication writes
+its new L0 rows before making them reader-visible; the production L0 path has
+no producer journal. Restart recovers those runs until their seal is committed.
+The shorter publication cadence reduces visibility delay independently of the
+seal interval, at the cost of more frequent L0 publications. Measure CPU, device
+writes and restart time when qualifying that cadence.
 Changing this threshold does not change the on-disk format.

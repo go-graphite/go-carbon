@@ -299,12 +299,12 @@ func NewRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, prior *Ro
 
 // metricParts probes only the routed scopes whose sorted name bounds overlap.
 // Common parts retain no series directory: metadata is decoded by the request's
-// existing iterator. Source-local authority is kept separately for moved names.
-func (s *RollupSnapshot) metricParts(m *snapshotMetric) []*readPartMetric {
+// existing iterator. Use the request name instead of reverse-resolving its ID.
+// Source-local authority is kept separately for moved names.
+func (s *RollupSnapshot) metricParts(name string, m *snapshotMetric) []*readPartMetric {
 	if parts, ok := s.partOverrides[m]; ok {
 		return parts
 	}
-	name := string(m.latest.metricName())
 	scoped := s.routes[partRoute{m.latest.policy.Group, m.latest.vshard}]
 	out := make([]*readPartMetric, 0, len(scoped))
 	for _, p := range scoped {
@@ -361,7 +361,7 @@ func (s *RollupSnapshot) LookupMetadata(name string) (RollupPolicy, RollupMetada
 func (s *RollupSnapshot) MetricVersion(name string) any {
 	if m := s.metrics[name]; m != nil {
 		if s.opened != nil {
-			return openedMetricVersion{state: m.latest, parts: s.metricPartIdentity(m)}
+			return openedMetricVersion{state: m.latest, parts: s.metricPartIdentity(name, m)}
 		}
 		return m
 	}
@@ -429,7 +429,7 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 	count := copy(candidates[:], s.cache.entries[cacheKey])
 	s.cache.mu.Unlock()
 	var cached *archiveResult
-	partList := s.metricParts(m)
+	partList := s.metricParts(name, m)
 	parts := make(map[string]struct{}, len(partList))
 	for _, part := range partList {
 		parts[part.part.id] = struct{}{}
@@ -483,7 +483,7 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 	if cached != nil {
 		skip = func(part *readPartMetric) bool { _, ok := cached.parts[part.part.id]; return ok }
 	}
-	if err := s.eachPartRecord(ctx, m, partList, archive, first, last, false, skip, func(record sealrollup.Record, origin partOrigin) error {
+	if err := s.eachPartRecord(ctx, name, m, partList, archive, first, last, false, skip, func(record sealrollup.Record, origin partOrigin) error {
 		found = append(found, slotCandidate{record, origin})
 		return nil
 	}); err != nil {
@@ -593,7 +593,7 @@ func (s *RollupSnapshot) scanArchiveParts(ctx context.Context, name string, arch
 // [first, last) of every part in partList that skip does not exclude, in part
 // order: each slot's per-slot winner per part, or with versions every stored
 // version (kinds and Upto included).
-func (s *RollupSnapshot) eachPartRecord(ctx context.Context, m *snapshotMetric, partList []*readPartMetric, archive int, first, last int64, versions bool, skip func(*readPartMetric) bool, visit func(sealrollup.Record, partOrigin) error) error {
+func (s *RollupSnapshot) eachPartRecord(ctx context.Context, name string, m *snapshotMetric, partList []*readPartMetric, archive int, first, last int64, versions bool, skip func(*readPartMetric) bool, visit func(sealrollup.Record, partOrigin) error) error {
 	archiveCount := m.latest.schema().Archives[archive].Count
 	if s.directory != "" {
 		ctx = WithRollupDirectory(ctx, s.directory)
@@ -645,7 +645,7 @@ func (s *RollupSnapshot) eachPartRecord(ctx context.Context, m *snapshotMetric, 
 			ids = &metricIDs{known: part.PolicyIdentity}
 		}
 		if part.meta.Frontier.Order == 0 {
-			key, ok, e := ids.key(part.part.key, "")
+			key, ok, e := ids.key(part.part.key, v2part.ID(name))
 			if e != nil || !ok {
 				return e
 			}
@@ -670,7 +670,7 @@ func (s *RollupSnapshot) eachPartRecord(ctx context.Context, m *snapshotMetric, 
 		if !s.recordVisible(m, origin, seq, part.meta.Frontier.Order) {
 			return nil
 		}
-		key, ok, err := ids.key(part.part.key, "")
+		key, ok, err := ids.key(part.part.key, v2part.ID(name))
 		if err != nil || !ok {
 			return err
 		}
@@ -1134,8 +1134,8 @@ type openedMetricVersion struct {
 	parts string
 }
 
-func (s *RollupSnapshot) metricPartIdentity(m *snapshotMetric) string {
-	parts := s.metricParts(m)
+func (s *RollupSnapshot) metricPartIdentity(name string, m *snapshotMetric) string {
+	parts := s.metricParts(name, m)
 	ids := make([]string, 0, len(parts))
 	for _, p := range parts {
 		ids = append(ids, p.part.id)

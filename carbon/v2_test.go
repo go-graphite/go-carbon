@@ -29,7 +29,7 @@ func v2TestApp(t *testing.T, root string) *App {
 		t.Fatal(err)
 	}
 	c := app.Config
-	c.V2 = v2Config{Enabled: true, Path: filepath.Join(root, "v2"), Producers: 2, Shards: 2}
+	c.V2 = v2Config{Enabled: true, IDKeys: c.V2.IDKeys, Path: filepath.Join(root, "v2"), Producers: 2, Shards: 2}
 	c.Whisper.DataDir = filepath.Join(root, "empty")
 	c.Whisper.StoreDir = ""
 	if err := os.MkdirAll(c.Whisper.DataDir, 0700); err != nil {
@@ -52,6 +52,7 @@ func v2TestApp(t *testing.T, root string) *App {
 	c.Carbonserver.ScanFrequency = &Duration{time.Hour}
 	return app
 }
+
 // setV2Mode selects a storage mode. Dual modes run the classic input log,
 // which recovers the classic engine after a crash.
 func setV2Mode(a *App, mode string) {

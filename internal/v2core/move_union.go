@@ -69,7 +69,7 @@ func moveUnionWindows(ctx context.Context, donor, receiver *RollupSnapshot, name
 			}
 			// A TTL Mat need not have a per-slot compatibility winner. Include its
 			// window in the mixed-window inventory without treating it as fine input.
-			if err := index.eachPartRecord(ctx, m, index.metricParts(m), archive, 0, a.Count, true, nil, func(r sealrollup.Record, origin partOrigin) error {
+			if err := index.eachPartRecord(ctx, name, m, index.metricParts(name, m), archive, 0, a.Count, true, nil, func(r sealrollup.Record, origin partOrigin) error {
 				stream := uint8(1 << side)
 				if origin.Class == CopiedPart {
 					stream = 1
