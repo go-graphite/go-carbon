@@ -159,8 +159,10 @@ func (x rollupTail) Swap(i, j int) {
 	x.metrics[i], x.metrics[j] = x.metrics[j], x.metrics[i]
 	x.ids[i], x.ids[j] = x.ids[j], x.ids[i]
 	x.meta[i], x.meta[j] = x.meta[j], x.meta[i]
-	x.ttl[i], x.ttl[j] = x.ttl[j], x.ttl[i]
-	x.expAt[i], x.expAt[j] = x.expAt[j], x.expAt[i]
+	if x.ttl != nil {
+		x.ttl[i], x.ttl[j] = x.ttl[j], x.ttl[i]
+		x.expAt[i], x.expAt[j] = x.expAt[j], x.expAt[i]
+	}
 	x.from[i], x.from[j] = x.from[j], x.from[i]
 }
 
@@ -180,7 +182,10 @@ func (r *coreRollups) renumber() {
 	if d+f >= math.MaxUint32 {
 		return // every new name stays unranked; plans stay exact on the search path
 	}
-	tail := rollupTail{r.unranked, r.ids[d:], r.meta[d:], r.ttl[d:], r.expAt[d:], make([]uint32, f)}
+	tail := rollupTail{metrics: r.unranked, ids: r.ids[d:], meta: r.meta[d:], from: make([]uint32, f)}
+	if r.ttl != nil {
+		tail.ttl, tail.expAt = r.ttl[d:], r.expAt[d:]
+	}
 	for k := range tail.from {
 		tail.from[k] = uint32(d + k)
 	}
@@ -195,7 +200,10 @@ func (r *coreRollups) renumber() {
 	n := 0
 	for i, id := range r.ids[:d] {
 		if id != deadSlot {
-			r.dense[n], r.ids[n], r.meta[n], r.ttl[n], r.expAt[n] = r.dense[i], id, r.meta[i], r.ttl[i], r.expAt[i]
+			r.dense[n], r.ids[n], r.meta[n] = r.dense[i], id, r.meta[i]
+			if r.ttl != nil {
+				r.ttl[n], r.expAt[n] = r.ttl[i], r.expAt[i]
+			}
 			if moved != nil {
 				moved[i] = uint32(n)
 			}
@@ -209,10 +217,16 @@ func (r *coreRollups) renumber() {
 		clear(r.dense[size:])
 	}
 	r.dense = slices.Grow(r.dense, size-len(r.dense))[:size]
-	r.ids, r.meta, r.ttl, r.expAt = r.ids[:size], r.meta[:size], r.ttl[:size], r.expAt[:size]
+	r.ids, r.meta = r.ids[:size], r.meta[:size]
+	if r.ttl != nil {
+		r.ttl, r.expAt = r.ttl[:size], r.expAt[:size]
+	}
 	for i, j, w, o := n-1, f-1, size-1, d-1; j >= 0; w-- {
 		if i >= 0 && compareRollupMetrics(r.dense[i], fresh.metrics[j]) > 0 {
-			r.dense[w], r.ids[w], r.meta[w], r.ttl[w], r.expAt[w] = r.dense[i], r.ids[i], r.meta[i], r.ttl[i], r.expAt[i]
+			r.dense[w], r.ids[w], r.meta[w] = r.dense[i], r.ids[i], r.meta[i]
+			if r.ttl != nil {
+				r.ttl[w], r.expAt[w] = r.ttl[i], r.expAt[i]
+			}
 			if moved != nil {
 				for moved[o] != uint32(i) { // compacted slot i came from old slot o
 					o--
@@ -222,7 +236,10 @@ func (r *coreRollups) renumber() {
 			}
 			i--
 		} else {
-			r.dense[w], r.ids[w], r.meta[w], r.ttl[w], r.expAt[w] = fresh.metrics[j], fresh.ids[j], fresh.meta[j], fresh.ttl[j], fresh.expAt[j]
+			r.dense[w], r.ids[w], r.meta[w] = fresh.metrics[j], fresh.ids[j], fresh.meta[j]
+			if r.ttl != nil {
+				r.ttl[w], r.expAt[w] = fresh.ttl[j], fresh.expAt[j]
+			}
 			if moved != nil {
 				moved[fresh.from[j]] = uint32(w)
 			}
