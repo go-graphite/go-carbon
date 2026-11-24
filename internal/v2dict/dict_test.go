@@ -646,9 +646,9 @@ func TestGeneration(t *testing.T) {
 }
 
 // TestAppendDuringFlush: the level file of a full append level is written in
-// the background, so appends, syncs and lookups go on while that write is
-// stalled, and the frozen append level stays readable until its file
-// replaces it.
+// the background, so appends below the next table's bound, syncs and lookups
+// go on while that write is stalled. The frozen level stays readable until
+// its file replaces it.
 func TestAppendDuringFlush(t *testing.T) {
 	dir := t.TempDir()
 	release, blocked := make(chan struct{}), make(chan struct{}, 1)
@@ -667,18 +667,15 @@ func TestAppendDuringFlush(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	n := 0
-	for stalled := false; !stalled; n++ {
-		if _, _, err := d.Append("g", 3, synthName(n), 0); err != nil {
-			t.Fatal(err)
-		}
-		select {
-		case <-blocked:
-			stalled = true
-		default:
-		}
+	if _, _, err := d.Append("g", 3, synthName(0), 0); err != nil {
+		t.Fatal(err)
 	}
-	total := n + 1000
+	if err := d.freeze(true); err != nil {
+		t.Fatal(err)
+	}
+	<-blocked
+	n := 1
+	total := n + 8 // leave room below the 4 KiB active-table bound
 	done := make(chan error, 1)
 	go func() {
 		for i := n; i < total; i++ {
