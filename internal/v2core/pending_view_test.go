@@ -364,6 +364,7 @@ func TestPendingMetadataDueIncremental(t *testing.T) {
 		r := newCoreRollups()
 		if seed%2 == 0 {
 			r.expire = func(RollupPolicy, RollupMetadata, time.Time) bool { return false }
+			r.setExpiryTTL(expiryWindow(time.Hour))
 		}
 		// Real catalog handles: half the names have a coarse archive.
 		handles := map[uint64]*ApplicationPolicy{}
@@ -411,8 +412,7 @@ func TestPendingMetadataDueIncremental(t *testing.T) {
 			// packet carries a never-seen name (some wide), often the packet's
 			// first, so a pass that skips one position diverges.
 			for _, b := range packet {
-				r.metrics[b.ID] = uint32(len(r.unranked))
-				r.unranked = append(r.unranked, &PolicyIdentity{})
+				r.install(b.ID, handles[b.ID], metricMetadata{})
 			}
 			if rng.IntN(2) == 0 {
 				fresh := 0
@@ -445,8 +445,7 @@ func TestPendingMetadataDueIncremental(t *testing.T) {
 				// A due pass seals: install every pending name, as the seal
 				// would, and start a fresh head.
 				h.view(find).IDs(0, h.n, func(_ int, id uint64, _ *coreBatch) bool {
-					r.metrics[id] = uint32(len(r.unranked))
-					r.unranked = append(r.unranked, &PolicyIdentity{})
+					r.install(id, handles[id], metricMetadata{})
 					return true
 				})
 				h = pendingHead{}
@@ -478,8 +477,7 @@ func BenchmarkPendingScan(b *testing.B) {
 	lookup := func(id uint64) *ApplicationPolicy { lookups++; return pols[id-1] }
 	r := newCoreRollups()
 	for id := range pols {
-		r.metrics[uint64(id)+1] = uint32(len(r.unranked))
-		r.unranked = append(r.unranked, &PolicyIdentity{})
+		rollupTestInstall(r, uint64(id)+1, pols[id], metricMetadata{})
 	}
 	encoded := make([]pendingRows, len(packets))
 	for i, packet := range packets {

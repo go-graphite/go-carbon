@@ -229,14 +229,14 @@ func (w *sealSweepWorld) planner() *coreRollups {
 func (w *sealSweepWorld) adopt() *coreRollups {
 	next := w.planner()
 	next.identities = w.r.identities
-	ids := make([]uint64, 0, len(w.r.metrics))
-	for id := range w.r.metrics {
+	ids := make([]uint64, 0, len(rollupTestIDs(w.r)))
+	for _, id := range rollupTestIDs(w.r) {
 		ids = append(ids, id)
 	}
 	slices.Sort(ids)
 	for _, id := range ids {
 		m := w.r.installed(id)
-		next.install(id, m, w.r.metaOf(id))
+		rollupTestInstall(next, id, m, w.r.metaOf(id))
 	}
 	return next
 }
@@ -244,10 +244,10 @@ func (w *sealSweepWorld) adopt() *coreRollups {
 // move reinstalls every 7th metric as move adoption does. The canonical
 // identity is shared; there is no separate owner wrapper to replace.
 func (w *sealSweepWorld) move(seal int) {
-	for id := range w.r.metrics {
+	for _, id := range rollupTestIDs(w.r) {
 		m := w.r.installed(id)
 		if id%7 == uint64(seal%7) {
-			w.r.install(id, m, w.r.metaOf(id))
+			rollupTestInstall(w.r, id, m, w.r.metaOf(id))
 		}
 	}
 }
@@ -387,7 +387,7 @@ type sealSweepPlannerState struct {
 
 func sealSweepState(r *coreRollups) sealSweepPlannerState {
 	var st sealSweepPlannerState
-	for id := range r.metrics {
+	for _, id := range rollupTestIDs(r) {
 		st.IDs = append(st.IDs, id)
 	}
 	slices.Sort(st.IDs)

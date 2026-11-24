@@ -94,14 +94,12 @@ type coreRollups struct {
 
 	rankMu    *sync.Mutex // existing owner publication lock; legacy renumber only
 	stage     func(string)
-	metrics   map[uint64]uint32 // NumericID -> owner slot; no shared pointer or hint
 	taken     []uint64
 	due       []uint32
 	planNow   int64
 	planClock time.Time
-	// names holds each installed name's fingerprint; pendingNames those of
-	// this plan's fresh names. Both are pointer-free sets that read no name
-	// bytes and hold no slot, so renumber moves no entry.
+	// names maps installed fingerprints to owner slots without reading name
+	// bytes. pendingNames holds this plan's fresh fingerprints and stages.
 	names namefp.Table
 	// stages is the seal's pointer-free work list; stageMetrics[i] is the
 	// metric of stages[i], the only pointer per stage.
@@ -158,13 +156,12 @@ const rankSlack = 64
 const rollupMetadataArchive = uint32(math.MaxUint32)
 
 func newCoreRollups() *coreRollups {
-	return &coreRollups{identities: &PolicyCatalog{}, metrics: map[uint64]uint32{}, expiries: calendar{slots: map[int64][]uint32{}}}
+	return &coreRollups{identities: &PolicyCatalog{}, expiries: calendar{slots: map[int64][]uint32{}}}
 }
 
-// install is the only writer of metrics and names. It indexes every installed
-// name and files its inactivity expiry, when enabled. meta becomes id's scalars.
+// install indexes every installed name and files its inactivity expiry, when enabled. meta becomes id's scalars.
 func (r *coreRollups) install(id uint64, m *PolicyIdentity, meta metricMetadata) {
-	old := r.installed(id)
+	old := r.installedIdentity(id, m)
 	s := uint32(len(r.ids))
 	if old != nil {
 		s = r.slotOf(id, old)
@@ -188,10 +185,9 @@ func (r *coreRollups) install(id uint64, m *PolicyIdentity, meta metricMetadata)
 		r.ids, r.meta, r.unranked = append(r.ids, id), append(r.meta, metricMetadata{}), append(r.unranked, m)
 	}
 	r.meta[s] = meta
-	r.metrics[id] = s
 	m.ownerSlot.Store(s + 1)
 	if old != m {
-		r.names.Put(m.fingerprint(), 0) // a set: the slot is m's ownerSlot
+		r.names.Put(m.fingerprint(), s)
 	}
 	if r.expire != nil {
 		r.resolveTTL(s, m, r.clock())
@@ -393,55 +389,132 @@ func (r *coreRollups) needsMetadataSeal(b *coreBatch) bool {
 	return len(b.Registered.schema().Archives) > 1
 }
 
-// pendingMetadataDue reports whether a pending name that is not installed yet
-// needs a metadata seal. It visits only positions appended since its last
-// clear pass, and resolves catalog handles only for names not installed.
+// pendingMetadataDue shares row classification with publication. Only fresh
+// names can need a first metadata seal; installation is monotonic even across
+// expiry and renumber. A background commit may have installed a listed name.
 func (r *coreRollups) pendingMetadataDue(h *pendingHead, lookup func(uint64) *ApplicationPolicy) bool {
-	due := false
-	h.rawView(lookup).IDs(h.scanned, h.n, func(_ int, id uint64, cold *coreBatch) bool {
-		if r.installed(id) != nil {
+	r.noteNewNames(h, lookup)
+	for _, f := range h.fresh {
+		if r.installed(f.id) == nil && r.needsMetadataSeal(&coreBatch{ID: f.id, Registered: lookup(f.id)}) {
 			return true
 		}
-		b := coreBatch{ID: id}
-		if cold != nil {
-			b.Registered, b.Policy = cold.Registered, cold.Policy
-		} else {
-			b.Registered = lookup(id)
-		}
-		due = r.needsMetadataSeal(&b)
-		return !due
-	})
-	if !due {
-		h.scanned = h.n
 	}
-	return due
+	// Rows without a catalog handle retain the original policy fallback.
+	if h.unresolved {
+		due := false
+		h.rawView(lookup).IDs(h.scanned, h.n, func(_ int, id uint64, cold *coreBatch) bool {
+			b := coreBatch{ID: id, Registered: lookup(id)}
+			if cold != nil {
+				b = *cold
+			}
+			due = r.installed(id) == nil && r.needsMetadataSeal(&b)
+			return !due
+		})
+		if !due {
+			h.scanned = h.n
+		}
+		return due
+	}
+	// Cold applications carry their policy inline and are absent from fresh.
+	v := h.rawView(lookup)
+	for i := range v.segs {
+		s := &v.segs[i]
+		for j := max(0, h.scanned-s.start); j < len(s.cold); j++ {
+			b := &s.cold[j]
+			if r.installed(b.ID) == nil && r.needsMetadataSeal(b) {
+				return true
+			}
+		}
+	}
+	h.scanned = h.n
+	return false
 }
 
-// noteNewNames extends the head's new-name list over positions appended since
-// its last pass: each row ID that is not installed, once, with its name hash.
-// Installed names have sealed metadata in every snapshot published after their
-// install, which readers resolve by name. Only these IDs touch the catalog.
-// The caller excludes a concurrent Commit (the owner loop, or sealPubMu). A
-// nil r (no rollups) has nothing installed.
+// noteNewNames classifies only newly appended positions. The existing sorted
+// runs recognize IDs classified by earlier publications and keep first
+// catalog reads in numeric order. Metadata maintenance shares this result. Names
+// retain metadata through expiry; move adoption and renumber preserve membership.
+// The caller excludes Commit (the owner loop, or sealPubMu).
 func (r *coreRollups) noteNewNames(h *pendingHead, lookup func(uint64) *ApplicationPolicy) {
-	h.rawView(lookup).IDs(h.freshScanned, h.n, func(_ int, id uint64, cold *coreBatch) bool {
-		if cold != nil || (r != nil && r.installed(id) != nil) {
-			return true
-		}
+	if h.freshScanned == h.n {
+		return
+	}
+	visit := func(id uint64) {
 		if _, ok := h.freshIDs[id]; ok {
-			return true
+			return
+		}
+		if r != nil {
+			m := r.identities.lookup(id)
+			if _, ok := r.hintSlot(m, id); ok {
+				return
+			}
+			if _, ok := r.nameSlot(id, m); ok {
+				return
+			}
 		}
 		policy := lookup(id)
 		if policy == nil {
-			return true // a plain row without rollups has no name to request
+			h.unresolved = true
+			return
 		}
 		if h.freshIDs == nil {
 			h.freshIDs = map[uint64]struct{}{}
 		}
 		h.freshIDs[id] = struct{}{}
 		h.fresh = append(h.fresh, pendingFresh{hash: policy.NameHash(), id: id})
-		return true
-	})
+	}
+	v := h.view(lookup)
+	// Cursors merge the new IDs against already classified runs. They are
+	// iterator positions only; the existing runs remain the sole pending index.
+	cursors := make([]int, len(v.runs))
+	for ri, run := range v.runs {
+		if run.hi <= h.freshScanned {
+			continue
+		}
+		clear(cursors)
+		var prev uint64
+		have := false
+		for _, key := range run.keys {
+			pos, id := int(uint32(key)), key>>32
+			if have && prev == id {
+				continue
+			}
+			// Positions ascend within an ID. An earlier position was classified
+			// already; installed membership cannot disappear during this head.
+			if pos < max(h.freshScanned, run.lo) || pos >= run.hi {
+				if !h.unresolved {
+					prev, have = id, true
+				}
+				continue
+			}
+			prev, have = id, true
+			known := false
+			if !h.unresolved {
+				for j := 0; j < ri; j++ {
+					keys := v.runs[j].keys
+					for cursors[j] < len(keys) && keys[cursors[j]]>>32 < id {
+						cursors[j]++
+					}
+					if cursors[j] < len(keys) && keys[cursors[j]]>>32 == id {
+						known = true
+						break
+					}
+				}
+			}
+			if !known {
+				visit(id)
+			}
+		}
+	}
+	// Wide IDs have no run key. Cold applications already carry their name.
+	for i := range v.segs {
+		s := &v.segs[i]
+		for _, e := range s.escapes {
+			if e.ID >= 1<<32 && s.start+int(e.Row-s.firstRow()) >= h.freshScanned {
+				visit(e.ID)
+			}
+		}
+	}
 	h.freshScanned = h.n
 }
 
@@ -589,7 +662,7 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 			firstRegistered, firstPolicy = first.cold.Registered, first.cold.Policy
 		}
 		// A valid identity hint reaches either kind of owner slot directly.
-		// Missing or overwritten hints use the owner's numeric slot map.
+		// Missing or overwritten hints use the installed fingerprint table.
 		var m *PolicyIdentity
 		slot, hinted := r.hintSlot(firstRegistered, id)
 		rk := uint32(0)

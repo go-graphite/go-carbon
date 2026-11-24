@@ -94,7 +94,7 @@ func (r *coreRollups) hintSlot(h *PolicyIdentity, id uint64) (uint32, bool) {
 }
 
 // hintRank returns the rank of the name installed under id when hint h
-// leads to its slot here, 0 otherwise (the caller probes metrics). A slot
+// leads to its slot here, 0 otherwise (the caller probes names). A slot
 // below len(dense) is the rank minus one.
 func (r *coreRollups) hintRank(h *PolicyIdentity, id uint64) uint32 {
 	if s, ok := r.hintSlot(h, id); ok && int(s) < len(r.dense) {
@@ -116,22 +116,37 @@ func (r *coreRollups) metricRank(m *PolicyIdentity) uint32 {
 // passes ids[s] == id there, and the next renumber drops the slot.
 const deadSlot = math.MaxUint64
 
-// installed resolves this owner's numeric ID through its slot map.
+// installed resolves identity before validating its owner-slot hint.
 func (r *coreRollups) installed(id uint64) *PolicyIdentity {
-	s, ok := r.metrics[id]
-	if !ok {
-		return nil
-	}
-	return r.slotMetric(s)
+	return r.installedIdentity(id, r.identities.lookup(id))
 }
 
-// slotOf uses the owner's numeric map, so move adoption can share metrics
-// and overwrite identity hints without a name comparison or an unranked scan.
+// nameSlot validates the owner-local slot independently of shared identity hints.
+// A colliding fingerprint must never alias another numeric ID.
+func (r *coreRollups) nameSlot(id uint64, m *PolicyIdentity) (uint32, bool) {
+	if m == nil {
+		return 0, false
+	}
+	s, ok := r.names.Get(m.fingerprint())
+	return s, ok && uint64(s) < uint64(len(r.ids)) && r.ids[s] == id
+}
+
+func (r *coreRollups) installedIdentity(id uint64, m *PolicyIdentity) *PolicyIdentity {
+	if s, ok := r.hintSlot(m, id); ok {
+		return r.slotMetric(s)
+	}
+	if s, ok := r.nameSlot(id, m); ok {
+		return r.slotMetric(s)
+	}
+	return nil
+}
+
+// slotOf uses the owner's fingerprint table when adoption overwrites hints.
 func (r *coreRollups) slotOf(id uint64, m *PolicyIdentity) uint32 {
 	if s, ok := r.hintSlot(m, id); ok && r.slotMetric(s) == m {
 		return s
 	}
-	s, ok := r.metrics[id]
+	s, ok := r.nameSlot(id, m)
 	if !ok || r.slotMetric(s) != m {
 		panic("v2core: installed rollup metric has no owner slot")
 	}
@@ -248,7 +263,7 @@ func (r *coreRollups) renumber() {
 	}
 	r.expiries.move(moved)
 	for s, m := range r.dense {
-		r.metrics[r.ids[s]] = uint32(s)
+		r.names.Put(m.fingerprint(), uint32(s))
 		if m.ownerSlot.Load() != uint32(s)+1 {
 			m.ownerSlot.Store(uint32(s) + 1)
 		}

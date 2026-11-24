@@ -290,9 +290,11 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 	next.identities = o.rollups.identities
 	next.parallelism = o.rollups.parallelism
 	next.stage, next.expire, next.now, next.expiryTTL = o.rollups.stage, o.rollups.expire, o.rollups.now, o.rollups.expiryTTL
-	for id := range o.rollups.metrics {
-		m := o.rollups.installed(id)
-		next.install(id, m, o.rollups.meta[o.rollups.slotOf(id, m)])
+	for slot, id := range o.rollups.ids {
+		if id == deadSlot {
+			continue
+		}
+		next.install(id, o.rollups.slotMetric(uint32(slot)), o.rollups.meta[slot])
 	}
 	for name, donor := range prepared.index.metrics {
 		id := ids[name]

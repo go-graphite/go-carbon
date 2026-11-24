@@ -295,6 +295,8 @@ type pendingHead struct {
 	// Installed metrics, the catalog and the expiry policy only ever add, so
 	// a cleared position stays clear until the head resets.
 	scanned int
+	// unresolved keeps plain rows with no catalog handle on the cold scan path.
+	unresolved bool
 	// fresh is the head's published new-name list (PendingView.NewNames);
 	// freshScanned the positions it covers, freshIDs its members.
 	fresh        []pendingFresh

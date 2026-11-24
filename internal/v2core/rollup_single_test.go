@@ -216,7 +216,7 @@ func closureTestStore(t testing.TB, n int, t0 int64) *coreRollups {
 		}
 		meta := freshMetadata
 		meta.Version, meta.Frontier.Order, meta.Frontier.MaxTime = 3, uint64(i+1), t0-int64(i%300)
-		r.install(uint64(i+1), m, meta)
+		rollupTestInstall(r, uint64(i+1), m, meta)
 	}
 	return r
 }

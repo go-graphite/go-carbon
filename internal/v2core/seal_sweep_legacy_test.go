@@ -120,7 +120,7 @@ func (r *coreRollups) planPartsLegacy(in coreSealInput) (coreSealPlan, error) {
 		now = r.now()
 	}
 	if r.expire != nil {
-		for id := range r.metrics { // the full walk: single-archive names are never due
+		for _, id := range rollupTestIDs(r) { // the full walk: single-archive names are never due
 			m := r.installed(id)
 			if _, seen := positions[id]; seen {
 				continue

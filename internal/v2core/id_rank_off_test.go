@@ -70,7 +70,7 @@ func TestIDKeyedSealNoNameRanks(t *testing.T) {
 			id := uint64(i + 1)
 			m := r.installed(id)
 			md := r.meta[r.slotOf(id, m)]
-			other.install(id, m, md)
+			rollupTestInstall(other, id, m, md)
 		}
 		for i := 0; i < count; i++ {
 			h := handles[i]
@@ -87,19 +87,19 @@ func TestRollupNumericSlotSharedHints(t *testing.T) {
 	const n = 300
 	for i := 0; i < n; i++ {
 		m := rankTestMetric(i)
-		a.install(m.id, m, metricMetadata{Revision: uint64(i + 7)})
+		rollupTestInstall(a, m.id, m, metricMetadata{Revision: uint64(i + 7)})
 	}
 	for i := n - 1; i >= 0; i-- {
 		id := uint64(i + 1)
-		b.install(id, a.installed(id), metricMetadata{Revision: id + 1000})
+		rollupTestInstall(b, id, a.installed(id), metricMetadata{Revision: id + 1000})
 	}
-	for id := range a.metrics {
+	for _, id := range rollupTestIDs(a) {
 		m := a.installed(id)
 		m.name.Store(nil)
 		m.catalog = nil
 	}
 	for round := 0; round < 3; round++ {
-		for id := range a.metrics {
+		for _, id := range rollupTestIDs(a) {
 			m := a.installed(id)
 			m.ownerSlot.Store(0)
 			if got := a.meta[a.slotOf(id, m)].Revision; got != id+6 {

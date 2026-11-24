@@ -238,13 +238,13 @@ func TestCoreRollupFailureDoesNotPublish(t *testing.T) {
 	}
 	// Interned immutable definitions may be shared before ingest. Mutable
 	// slots/frontiers are published only by the successful commit callback.
-	if len(r.metrics) != 0 {
+	if len(rollupTestIDs(r)) != 0 {
 		t.Fatal("planner published before ingest")
 	}
 	if plan.Abort != nil {
 		plan.Abort()
 	}
-	if len(r.metrics) != 0 {
+	if len(rollupTestIDs(r)) != 0 {
 		t.Fatal("abort published state")
 	}
 	plan, err = r.plan(SealInput{Batches: []Batch{valid}})
@@ -263,7 +263,7 @@ func TestCoreRollupFailureDoesNotPublish(t *testing.T) {
 		if _, err = r.plan(SealInput{Batches: []Batch{bad}}); err == nil {
 			t.Fatal("invalid application accepted")
 		}
-		if r.metaOf(7).Frontier != before.Frontier || r.metaOf(7).Revision != before.Revision || len(r.metrics) != 1 {
+		if r.metaOf(7).Frontier != before.Frontier || r.metaOf(7).Revision != before.Revision || len(rollupTestIDs(r)) != 1 {
 			t.Fatal("failed planner changed durable view")
 		}
 	}
@@ -296,7 +296,7 @@ func TestCoreRollupIngestFailureDoesNotPublish(t *testing.T) {
 	if _, err = owner.sealBatches(rows, len(rows), rows[0].Time, PendingBatches(batches), Frontier{Version: 1, Config: cfg, Cursors: []uint64{1}, NextPart: 1}); err == nil {
 		t.Fatal("read-only ingest succeeded")
 	}
-	if len(r.metrics) != 0 {
+	if len(rollupTestIDs(r)) != 0 {
 		t.Fatal("ingest failure published slots/frontier/activity")
 	}
 	snapshot := db.NewSnapshot()

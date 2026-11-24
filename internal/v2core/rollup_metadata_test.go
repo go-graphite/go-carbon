@@ -157,7 +157,7 @@ func TestRollupGroupPackingArenaAndAbort(t *testing.T) {
 		}
 	}
 	plan.Abort()
-	if len(r.metrics) != 0 {
+	if len(rollupTestIDs(r)) != 0 {
 		t.Fatal("abort published metrics")
 	}
 	plan, e = r.plan(in)
@@ -165,7 +165,7 @@ func TestRollupGroupPackingArenaAndAbort(t *testing.T) {
 		t.Fatal(e)
 	}
 	plan.Commit()
-	if len(r.metrics) != 512 || r.pending {
+	if len(rollupTestIDs(r)) != 512 || r.pending {
 		t.Fatal("commit lost reducer state or arena lease")
 	}
 	for i := range batches {
@@ -177,7 +177,7 @@ func TestRollupGroupPackingArenaAndAbort(t *testing.T) {
 		t.Fatal(e)
 	}
 	plan.Commit()
-	for id := range r.metrics {
+	for _, id := range rollupTestIDs(r) {
 		if r.metaOf(id).Frontier.Order != 2 {
 			t.Fatal("second seal lost frontier")
 		}

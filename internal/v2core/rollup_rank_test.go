@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-graphite/go-carbon/internal/namefp"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	partsformat "github.com/go-graphite/go-carbon/internal/v2part"
 	"github.com/go-graphite/go-whisper"
@@ -37,7 +38,8 @@ var rankTestPrepared = func() *sealrollup.Prepared {
 
 func rankTestMetric(i int) *PolicyIdentity {
 	def := &policyDefinition{prepared: rankTestPrepared, Group: partsformat.Group([]string{"z", "ab", "aa", "a"}[i%4])}
-	return (&PolicyIdentity{id: uint64(i + 1), policy: policyName{policyDefinition: def}, vshard: uint16((i * 2654435761) % 4096)}).withName(rankTestName(i))
+	fp := namefp.Name(rankTestName(i))
+	return (&PolicyIdentity{nameHash: fp.Hash, route: fp.Route, id: uint64(i + 1), policy: policyName{policyDefinition: def}, vshard: uint16((i * 2654435761) % 4096)}).withName(rankTestName(i))
 }
 
 // rankTestReplacement gives owner-slot tests a distinct identity without
@@ -56,8 +58,8 @@ func rankTestReplacement(h *PolicyIdentity) *PolicyIdentity {
 // order, and that no dead metric keeps a rank.
 func checkDense(t *testing.T, r *coreRollups) {
 	t.Helper()
-	if len(r.dense) != len(r.metrics) {
-		t.Fatalf("dense %d != metrics %d", len(r.dense), len(r.metrics))
+	if len(r.dense) != len(rollupTestIDs(r)) {
+		t.Fatalf("dense %d != metrics %d", len(r.dense), len(rollupTestIDs(r)))
 	}
 	for i, m := range r.dense {
 		if r.ids[i] != m.id || r.installed(m.id) != m {
@@ -82,32 +84,32 @@ func TestRollupRankSortMatchesMetricOrder(t *testing.T) {
 				all[i] = rankTestMetric(i)
 			}
 			for _, i := range rng.Perm(n)[:n/2] {
-				r.install(all[i].id, all[i], metricMetadata{})
+				rollupTestInstall(r, all[i].id, all[i], metricMetadata{})
 			}
 			r.renumber()
 			checkDense(t, r)
 			// Replace a few installed metrics with struct copies (stale rank),
 			// then reinstall some originals over their copies.
 			origs := map[uint64]*PolicyIdentity{}
-			for id := range r.metrics {
+			for _, id := range rollupTestIDs(r) {
 				m := r.installed(id)
 				if id%7 == 0 {
 					c := rankTestReplacement(m)
 					origs[id] = m
-					r.install(id, c, r.metaOf(id))
+					rollupTestInstall(r, id, c, r.metaOf(id))
 					all[id-1] = c
 				}
 			}
 			for id, m := range origs {
 				if id%2 == 0 {
-					r.install(id, m, r.metaOf(id))
+					rollupTestInstall(r, id, m, r.metaOf(id))
 					all[id-1] = m
 				}
 			}
 			// Unranked installs stay below the renumber threshold.
 			for i := range all {
 				if r.installed(all[i].id) == nil && i%13 == 0 {
-					r.install(all[i].id, all[i], metricMetadata{})
+					rollupTestInstall(r, all[i].id, all[i], metricMetadata{})
 				}
 			}
 			for round := 0; round < 2; round++ {
@@ -215,19 +217,19 @@ func TestRollupPlanRankDifferential(t *testing.T) {
 					for _, p := range []**coreRollups{&ranked, &ref} {
 						next := newPlanner()
 						next.identities = (*p).identities
-						for id := range (*p).metrics {
+						for _, id := range rollupTestIDs(*p) {
 							m := (*p).installed(id)
-							next.install(id, m, (*p).metaOf(id))
+							rollupTestInstall(next, id, m, (*p).metaOf(id))
 						}
 						*p = next
 					}
 				case 45, 75:
 					// A move reinstalls every 7th canonical identity in place.
 					for _, p := range []*coreRollups{ranked, ref} {
-						for id := range p.metrics {
+						for _, id := range rollupTestIDs(p) {
 							m := p.installed(id)
 							if id%7 == uint64(seal%7) {
-								p.install(id, m, p.metaOf(id))
+								rollupTestInstall(p, id, m, p.metaOf(id))
 							}
 						}
 					}
@@ -272,4 +274,21 @@ func TestRollupPlanRankDifferential(t *testing.T) {
 			checkDense(t, ranked)
 		})
 	}
+}
+
+// rollupTestIDs snapshots live slots, excluding replaced dense entries.
+func rollupTestIDs(r *coreRollups) []uint64 {
+	var ids []uint64
+	for _, id := range r.ids {
+		if id != deadSlot {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// Synthetic slot fixtures publish identities just as engine admission does.
+func rollupTestInstall(r *coreRollups, id uint64, m *PolicyIdentity, meta metricMetadata) {
+	r.identities.idPage(id>>10, true)[id&1023].Store(m)
+	r.install(id, m, meta)
 }
