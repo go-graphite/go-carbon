@@ -126,3 +126,77 @@ func TestRollupInstalledOverwrittenHint(t *testing.T) {
 		}
 	}
 }
+
+// Publication can classify a row as fresh while the previous head's background
+// seal is still running. Its commit must clear metadata demand without changing
+// the immutable new-name list readers already hold.
+func TestPendingClassificationAcrossInstall(t *testing.T) {
+	r := newCoreRollups()
+	lookup := func(id uint64) *ApplicationPolicy { return r.identities.lookup(id) }
+	var h pendingHead
+	for _, id := range []uint64{7, 1<<42 | 19} {
+		name := rankTestName(int(id & 31))
+		_, raw := rollupTestPolicy(t, name, "10s:3d,1m:14d", sealrollup.Last, .1)
+		m, err := r.identities.intern(id, name, raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.add([]coreBatch{{ID: id, Registered: m, Order: id, Clock: 100, Points: []row{{ID: id, Time: 99, Seq: id}}}}, lookup)
+	}
+	r.noteNewNames(&h, lookup)
+	published := h.view(lookup)
+	if len(published.fresh) != 2 || !r.pendingMetadataDue(&h, lookup) {
+		t.Fatal("new rows were not classified before metadata scan")
+	}
+	for _, f := range h.fresh {
+		r.install(f.id, lookup(f.id), metricMetadata{})
+	}
+	r.renumber()
+	if r.pendingMetadataDue(&h, lookup) {
+		t.Fatal("installed fresh name still requested metadata seal")
+	}
+	if len(published.fresh) != 2 || h.scanned != h.n {
+		t.Fatal("classification changed published names or lost progress")
+	}
+	// An unpublished cold application is independent of the row new-name list.
+	h.add([]coreBatch{{ID: 99, Policy: []byte("cold"), Order: 100, Points: []row{{ID: 99}}}}, lookup)
+	if !r.pendingMetadataDue(&h, lookup) {
+		t.Fatal("cold application lost metadata demand")
+	}
+}
+
+// Once this head classified an installed row ID, later publications and run
+// compactions must recognize it from pending progress without the catalog.
+func TestPendingClassificationOncePerHead(t *testing.T) {
+	r := newCoreRollups()
+	_, raw := rollupTestPolicy(t, rankTestName(7), "10s:3d,1m:14d", sealrollup.Last, .1)
+	m, err := r.identities.intern(7, rankTestName(7), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.install(7, m, metricMetadata{})
+	var h pendingHead
+	add := func(order uint64) {
+		var rows pendingRows
+		rows.startApplication(order, 100, 99, 2)
+		rows.addRow(7, 99, 1, order)
+		rows.addRow(7, 99, 2, order)
+		rows.closePacket()
+		h.addRows(&rows)
+	}
+	add(1)
+	r.noteNewNames(&h, r.identities.lookup)
+	pages := r.identities.pages.Swap(nil)
+	defer r.identities.pages.Store(pages)
+	unavailable := func(uint64) *ApplicationPolicy { t.Fatal("classified row revisited catalog"); return nil }
+	for order := uint64(2); order < 5; order++ {
+		add(order)
+		r.noteNewNames(&h, unavailable)
+		if r.pendingMetadataDue(&h, unavailable) || len(h.fresh) != 0 {
+			t.Fatal("installed row was classified fresh")
+		}
+		var c pendingCompaction
+		c.start(&h)
+		c.wait(&h)
+	}
+}
