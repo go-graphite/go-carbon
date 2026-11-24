@@ -175,6 +175,9 @@ func readSyncCheckpoint(f *os.File, identity string, options ...string) (*syncPh
 // Keep large receipt frontiers on disk. The size limit bounds the metadata
 // envelope, never the amount of verification evidence a sync may retain.
 func keepVerificationRow(row syncRow) bool {
+	if row.Kind == "ownership-scope" {
+		return true
+	}
 	if len(row.Resolved) > 0 {
 		return true
 	}

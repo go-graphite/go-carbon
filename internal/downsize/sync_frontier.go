@@ -51,7 +51,10 @@ func (s *syncer) openFrontier(ctx context.Context) error {
 		return nil
 	}
 	source := s.unionSource()
-	name, _, err := source.next()
+	name, mask, err := source.next()
+	for err == nil && !s.ownsSyncName(name, mask) {
+		name, mask, err = source.next()
+	}
 	source.close()
 	if errors.Is(err, io.EOF) {
 		return nil
@@ -70,7 +73,7 @@ func (s *syncer) openFrontier(ctx context.Context) error {
 		// cursor is consumed, rather than negotiating against an earlier name.
 		return nil
 	}
-	if !legacyRound || savedScopeErr != nil {
+	if (!legacyRound || savedScopeErr != nil) && !(s.owner != nil && savedScopeErr == nil) {
 		for _, store := range append([]string{s.o.to}, s.o.from...) {
 			got, err := b.Proofs(ctx, store, []string{name})
 			if errors.Is(err, errSyncNoProof) {

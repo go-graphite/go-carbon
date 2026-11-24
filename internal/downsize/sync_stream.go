@@ -26,10 +26,11 @@ import (
 // syncNameSource yields names with their source masks in byte order; next
 // returns io.EOF at the end.
 type syncNameSource struct {
-	id    func() int64 // stable union catalog line number for the last yielded name
-	total int
-	next  func() (string, uint64, error)
-	close func()
+	id     func() int64 // stable union catalog line number for the last yielded name
+	total  int
+	next   func() (string, uint64, error)
+	close  func()
+	rewind func() // local catalog only; never relists a backend
 }
 
 func (s *syncer) unionPath() string   { return filepath.Join(s.o.state, "union.tsv") }
@@ -265,7 +266,7 @@ func (s *syncer) discover(ctx context.Context) error {
 				mask |= 1 << uint(i-1)
 			}
 		}
-		owned := inTarget || s.owner == nil || s.owner(head)
+		owned := s.owner == nil || mask != 0 && s.owner(head)
 		if !owned {
 			notOwned++
 		} else {
@@ -393,6 +394,12 @@ func (s *syncer) unionSource() syncNameSource {
 				_ = f.Close()
 			}
 		},
+		rewind: func() {
+			if f != nil {
+				_ = f.Close()
+			}
+			f, scanner, ordinal = nil, nil, -1
+		},
 	}
 }
 
@@ -437,7 +444,7 @@ func (s *syncer) setSource(set []string) (syncNameSource, error) {
 		}
 		i++
 		return picked[i-1].name, picked[i-1].mask, nil
-	}, close: func() {}}, nil
+	}, close: func() {}, rewind: func() { i = 0 }}, nil
 }
 
 type syncMissing struct {

@@ -255,6 +255,17 @@ func (s *syncer) restorePhase() error {
 		}
 		s.resume = saved
 	}
+	// A ring scope can shrink an entered legacy round without changing its
+	// immutable catalog. Restore the narrowed total before either publisher
+	// starts; the legacy catalog size must not inflate it again on restart.
+	if saved.Phase == "verify" {
+		for _, r := range s.j.rows {
+			if r.Kind == "ownership-scope" && r.Round == saved.Round {
+				saved.Total = int64(r.Names)
+			}
+		}
+		s.resume = saved
+	}
 	var verifyReceipts int64
 	if saved.Phase == "verify" {
 		seen := map[[2]string]bool{}
@@ -350,12 +361,15 @@ func (s *syncer) reopenChangedScope(ctx context.Context) (changed bool, err erro
 		var names []string
 		var ids []int64
 		for len(names) < s.o.batch {
-			name, _, e := source.next()
+			name, mask, e := source.next()
 			if errors.Is(e, io.EOF) {
 				break
 			}
 			if e != nil {
 				return false, e
+			}
+			if !s.ownsSyncName(name, mask) {
+				continue
 			}
 			names = append(names, name)
 			ids = append(ids, source.id())
