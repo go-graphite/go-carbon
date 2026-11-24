@@ -165,9 +165,14 @@ func (e *engine) otlpMetrics(start, now time.Time, base []otlpKV, running bool) 
 	m.counter("replica_backfill_points_fillable", "Empty local slots a replica has.", s.fillable.Load())
 	var sent int64
 	if e.out != nil {
-		sent = e.out.stats.points.Load()
+		sent = s.confirmed.Load()
 	}
-	m.counter("replica_backfill_points_sent", "Points written to the local receiver.", sent)
+	m.counter("replica_backfill_points_sent", "Points read back from the local receiver after writing (not a persistence acknowledgement).", sent)
+	m.counter("replica_backfill_points_unconfirmed_observations", "Missing or differing points on confirmation reads; includes repeated observations, not attributed quota drops.", s.unconfirmedObservations.Load())
+	m.counter("replica_backfill_resent_batches", "Batch retries after unconfirmed writes.", s.resentBatches.Load())
+	m.counter("replica_backfill_points_resent", "Points rewritten after unconfirmed writes.", s.resentPoints.Load())
+	m.counter("replica_backfill_confirmation_failures", "Batches whose receiver confirmation failed.", s.confirmationFailures.Load())
+	m.gauge("replica_backfill_points_unconfirmed", "Submitted points not yet read back from the receiver.", max(0, s.submitted.Load()-s.confirmed.Load()))
 	m.counter("replica_backfill_step_mismatches", "Metrics a replica returned at another step.", s.stepMismatch.Load())
 	type target struct {
 		kind string

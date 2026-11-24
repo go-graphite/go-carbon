@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -164,9 +165,20 @@ func (c *client) list(ctx context.Context) ([]string, error) {
 // fetch multi-fetches exact metric names over [from, until]. Names the server
 // does not know are absent from the result.
 func (c *client) fetch(ctx context.Context, names []string, from, until int64) (map[string]series, error) {
+	return c.fetchExpression(ctx, names, from, until, "")
+}
+
+// fetchFresh gives every confirmation a unique response-cache key. Carbonserver
+// keys both legacy and canonical render caches by PathExpression, but fetches by
+// Name. This avoids reusing the pre-write response without changing the range.
+func (c *client) fetchFresh(ctx context.Context, names []string, from, until int64) (map[string]series, error) {
+	return c.fetchExpression(ctx, names, from, until, "replica-backfill:"+rand.Text()+":")
+}
+
+func (c *client) fetchExpression(ctx context.Context, names []string, from, until int64, expressionPrefix string) (map[string]series, error) {
 	req := protov3.MultiFetchRequest{Metrics: make([]*protov3.FetchRequest, len(names))}
 	for i, n := range names {
-		req.Metrics[i] = &protov3.FetchRequest{Name: n, PathExpression: n, StartTime: from, StopTime: until}
+		req.Metrics[i] = &protov3.FetchRequest{Name: n, PathExpression: expressionPrefix + n, StartTime: from, StopTime: until}
 	}
 	body, err := req.MarshalVT()
 	if err != nil {

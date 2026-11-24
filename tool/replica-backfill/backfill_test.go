@@ -214,7 +214,7 @@ func testOptions(local *fakeServer, ingest string, replicas ...*fakeServer) *opt
 		local: local.srv.URL, ingest: ingest, settle: 0,
 		lookback: 30 * time.Minute, batch: 500, workers: 2, replicaRPS: 1000,
 		timeout: 5 * time.Second, retries: 3, backoff: 5 * time.Millisecond, maxBack: 20 * time.Millisecond,
-		writeRate: 0, flushPt: 3, writeRetries: 3,
+		writeRate: 0, flushPt: 3, writeRetries: 3, confirmRetries: 3, confirmDelay: 5 * time.Millisecond,
 		from: strconv.Itoa(base), until: strconv.Itoa(base + 10*step),
 	}
 	for _, r := range replicas {
@@ -261,7 +261,7 @@ func TestFillOnlyMissingWithFallback(t *testing.T) {
 	// nowhere: no replica has it.
 	local.fill("e.nowhere", from-20*step, val, gap)
 
-	in := newIngest(t, nil)
+	in := newIngest(t, local.set)
 	r := runOK(t, testOptions(local, in.ln.Addr().String(), r1, r2))
 
 	var want []string
@@ -269,7 +269,7 @@ func TestFillOnlyMissingWithFallback(t *testing.T) {
 		want = append(want, line("a.gappy", 42.5, int64(ts)), line("d.fallback", 1e-7, int64(ts)))
 	}
 	sort.Strings(want)
-	if got := in.wait(t, len(want)); strings.Join(got, "\n") != strings.Join(want, "\n") {
+	if got := compactStrings(in.wait(t, len(want))); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("sent:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 	m := r.Metrics
@@ -296,14 +296,14 @@ func TestBatchingAndRateLimit(t *testing.T) {
 		local.fill(n, base-5*step, func(int64) float64 { return 1 }, func(ts int64) bool { return ts == base+5*step })
 		rep.fill(n, base, func(int64) float64 { return 2 }, nil)
 	}
-	in := newIngest(t, nil)
+	in := newIngest(t, local.set)
 	o := testOptions(local, in.ln.Addr().String(), rep)
 	o.batch, o.workers, o.replicaRPS = 10, 3, 10
 	began := time.Now()
 	r := runOK(t, o)
 	reqs := rep.renders()
-	if len(reqs) != 3 || len(local.renders()) != 3 {
-		t.Fatalf("want 3 batches, got replica %d local %d", len(reqs), len(local.renders()))
+	if len(reqs) != 3 || len(local.renders()) < 6 {
+		t.Fatalf("want 3 replica batches and at least 6 local reads, got replica %d local %d", len(reqs), len(local.renders()))
 	}
 	var seen []string
 	for _, q := range reqs {
@@ -339,9 +339,9 @@ func TestRetriesThrottlingAndFailover(t *testing.T) {
 		}
 		return 0
 	}
-	in := newIngest(t, nil)
+	in := newIngest(t, local.set)
 	r := runOK(t, testOptions(local, in.ln.Addr().String(), r1, r2))
-	if got := in.wait(t, 1); len(got) != 1 || got[0] != line("x", 3, base+step) || r.Replicas[r1.srv.URL]["retries"] != 2 {
+	if got := compactStrings(in.wait(t, 1)); len(got) != 1 || got[0] != line("x", 3, base+step) || r.Replicas[r1.srv.URL]["retries"] != 2 {
 		t.Fatalf("sent %v report %+v", got, r.Replicas)
 	}
 	if len(r2.renders()) != 0 {
@@ -349,16 +349,18 @@ func TestRetriesThrottlingAndFailover(t *testing.T) {
 	}
 
 	// Replica 1 down: everything comes from replica 2.
+	local.set("x", base+step, math.NaN())
 	r1.fail = func([]string, int) int { return http.StatusInternalServerError }
-	in2 := newIngest(t, nil)
+	in2 := newIngest(t, local.set)
 	r = runOK(t, testOptions(local, in2.ln.Addr().String(), r1, r2))
-	if got := in2.wait(t, 1); len(got) != 1 || got[0] != line("x", 4, base+step) || r.Replicas[r1.srv.URL]["failures"] != 1 {
+	if got := compactStrings(in2.wait(t, 1)); len(got) != 1 || got[0] != line("x", 4, base+step) || r.Replicas[r1.srv.URL]["failures"] != 1 {
 		t.Fatalf("failover sent %v report %+v", got, r.Replicas)
 	}
 
 	// Every replica down: the batch fails and nothing is written.
+	local.set("x", base+step, math.NaN())
 	r2.fail = r1.fail
-	in3 := newIngest(t, nil)
+	in3 := newIngest(t, local.set)
 	if _, err := run(context.Background(), testOptions(local, in3.ln.Addr().String(), r1, r2), time.Unix(base+3600, 0)); err == nil {
 		t.Fatal("expected failure with every replica down")
 	}
@@ -374,7 +376,7 @@ func TestStepMismatchIsNotFilled(t *testing.T) {
 	for ts := int64(base); ts <= base+10*step; ts += 30 {
 		rep.set("s", ts, 5)
 	}
-	in := newIngest(t, nil)
+	in := newIngest(t, local.set)
 	r := runOK(t, testOptions(local, in.ln.Addr().String(), rep))
 	if r.Metrics["step_mismatch"] != 1 || r.Metrics["unfilled_metrics"] != 1 || len(in.got()) != 0 {
 		t.Fatalf("report %+v sent %v", r.Metrics, in.got())
@@ -410,7 +412,7 @@ func TestCheckpointResume(t *testing.T) {
 	if json.Unmarshal(b, &c) != nil || c.DoneThrough != "m.19" || c.Complete {
 		t.Fatalf("checkpoint after failure %s", b)
 	}
-	if n := len(in.wait(t, 20)); n != 20 {
+	if n := len(compactStrings(in.wait(t, 20))); n != 20 {
 		t.Fatalf("first run sent %d points, want 20", n)
 	}
 
@@ -428,7 +430,7 @@ func TestCheckpointResume(t *testing.T) {
 		}
 	}
 	// m.30..m.39 were filled by the first run and are complete now.
-	if n := len(in.wait(t, 30)); n != 30 || r.Metrics["complete"] != 10 {
+	if n := len(compactStrings(in.wait(t, 30))); n != 30 || r.Metrics["complete"] != 10 {
 		t.Fatalf("after resume sent %d points (want 30), report %+v", n, r.Metrics)
 	}
 	b, _ = os.ReadFile(o.checkpoint)
@@ -452,7 +454,7 @@ func TestDryRun(t *testing.T) {
 	local, rep := newFake(t), newFake(t)
 	local.fill("d", base-5*step, func(int64) float64 { return 1 }, func(ts int64) bool { return ts >= base+step && ts <= base+3*step })
 	rep.fill("d", base, func(int64) float64 { return 2 }, nil)
-	in := newIngest(t, nil)
+	in := newIngest(t, local.set)
 	o := testOptions(local, in.ln.Addr().String(), rep)
 	o.dryRun = true
 	o.checkpoint = filepath.Join(t.TempDir(), "ckpt.json")
@@ -550,7 +552,7 @@ func TestWriterRateLimit(t *testing.T) {
 	if d := time.Since(began); d < 190*time.Millisecond {
 		t.Fatalf("30 points at 100/s took %s", d)
 	}
-	if len(in.wait(t, 30)) != 30 {
+	if len(compactStrings(in.wait(t, 30))) != 30 {
 		t.Fatalf("received %d lines", len(in.got()))
 	}
 }

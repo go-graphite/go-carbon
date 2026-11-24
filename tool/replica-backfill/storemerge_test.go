@@ -230,7 +230,7 @@ func checkStoreMerge(t *testing.T, c mergeCase, newerCached bool) {
 			from:     strconv.FormatInt(T-30*60, 10), until: strconv.FormatInt(T, 10),
 			lookback: 30 * time.Minute, batch: 100, workers: 1, replicaRPS: 100,
 			timeout: 10 * time.Second, retries: 2, backoff: 10 * time.Millisecond, maxBack: 100 * time.Millisecond,
-			flushPt: 1000, writeRetries: 3, dryRun: dry,
+			flushPt: 1000, writeRetries: 3, dryRun: dry, confirmRetries: 5, confirmDelay: 10 * time.Millisecond,
 		}
 	}
 	waitFor(t, "metric indexed", func() bool {

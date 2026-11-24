@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"strconv"
@@ -35,7 +36,7 @@ type writerStats struct {
 
 // writer sends points to the local plaintext receiver in large rate-limited
 // flushes. A batch is acknowledged once all its points are written to the
-// socket, so the checkpoint never passes points that were not sent.
+// socket. The engine must read them back before advancing its checkpoint.
 type writer struct {
 	addr       string
 	flushPts   int
@@ -52,6 +53,7 @@ type writer struct {
 	bufPts     int
 	waiters    []chan error
 	stats      writerStats
+	rateMu     sync.Mutex
 	maxPoints  int64 // immutable cap on wire attempts, including reconnect retries
 }
 
@@ -218,7 +220,10 @@ func (w *writer) send() error {
 	if err := w.conn.SetWriteDeadline(time.Now().Add(w.timeout)); err != nil {
 		return err
 	}
-	_, err := w.conn.Write(w.buf)
+	n, err := w.conn.Write(w.buf)
+	if err == nil && n != len(w.buf) {
+		err = io.ErrShortWrite
+	}
 	return err
 }
 
