@@ -681,6 +681,11 @@ func (s *RollupSnapshot) eachPartRecord(ctx context.Context, m *snapshotMetric, 
 			return err
 		}
 		prefix := lower[:archivePrefixLen(lower, key.ByID)]
+		summaryAllowed := len(m.latest.schema().Archives) == 1 && (part.meta.Version >= 4 || part.meta.ResetOrder == 0) && (m.latest.meta.Version >= 4 || m.latest.meta.ResetOrder == 0)
+		if move := s.moves[m]; move != nil && move.copied {
+			meta := move.origins[origin]
+			summaryAllowed = summaryAllowed && (meta.Version >= 4 || meta.ResetOrder == 0)
+		}
 		emit := func(record sealrollup.Record) error {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -725,6 +730,9 @@ func (s *RollupSnapshot) eachPartRecord(ctx context.Context, m *snapshotMetric, 
 				return errors.New("unexpected rollup ordinal")
 			}
 			value := it.Value()
+			if v2part.HasOrderSummary(value) && !summaryAllowed {
+				return errors.New("order summary under history policy or legacy reset")
+			}
 			if len(value) >= 4 && bytes.Equal(value[:4], []byte{'G', 'C', 'D', 1}) {
 				var records []sealrollup.Record
 				if versions {
@@ -734,6 +742,15 @@ func (s *RollupSnapshot) eachPartRecord(ctx context.Context, m *snapshotMetric, 
 				}
 				if err != nil {
 					return err
+				}
+				if v2part.HasOrderSummary(value) && len(records) > 0 {
+					d := part.part.descriptor
+					if part.part.imported != nil {
+						d = &part.part.imported.Descriptor
+					}
+					if d != nil && (records[0].Order < d.Source.MinOrder || records[0].Order > d.Source.MaxOrder) {
+						return errors.New("order summary outside source frontier")
+					}
 				}
 				for _, record := range records {
 					if err = emit(record); err != nil {

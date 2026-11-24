@@ -38,7 +38,7 @@ func TestDenseRecordVersions(t *testing.T) {
 		withUpto(versionRecord(14, 1020, 9, 8, sealrollup.KindMat), sealrollup.Tick(9, 0)),
 		withUpto(versionRecord(15, 1080, 9, 0, sealrollup.KindNone), sealrollup.Tick(10, 0)),
 	}
-	b, err := appendSlotsOrder(nil, rs, nil, false)
+	b, err := appendSlotsOrder(nil, rs, nil, ExactOrders)
 	if err != nil || b[4]&denseExtended == 0 || b[4]&denseAligned != 0 {
 		t.Fatalf("encode: mode %08b, %v", b[4], err)
 	}
@@ -74,12 +74,12 @@ func TestDenseRecordVersions(t *testing.T) {
 		t.Errorf("written-down absence version %+v", v)
 	}
 	// Upto belongs to Mat and None records only.
-	if _, err := appendSlotsOrder(nil, []sealrollup.Record{withUpto(versionRecord(3, 0, 5, 1, K), 7)}, nil, false); err == nil {
+	if _, err := appendSlotsOrder(nil, []sealrollup.Record{withUpto(versionRecord(3, 0, 5, 1, K), 7)}, nil, ExactOrders); err == nil {
 		t.Error("raw record with upto encoded")
 	}
 	// Raw-only runs, including the common aligned run, keep the older bytes.
 	plain := []sealrollup.Record{versionRecord(3, 0, 5, 1, K), versionRecord(4, 60, 5, 2, K)}
-	pb, err := appendSlotsOrder(nil, plain, nil, false)
+	pb, err := appendSlotsOrder(nil, plain, nil, ExactOrders)
 	if err != nil || pb[4]&denseExtended != 0 || pb[4]&denseAligned == 0 {
 		t.Fatalf("raw run mode %08b, %v", pb[4], err)
 	}
@@ -97,10 +97,10 @@ func TestDenseRecordVersions(t *testing.T) {
 			t.Fatalf("extension byte %#x accepted", ext)
 		}
 	}
-	if _, err := appendSlotsOrder(nil, []sealrollup.Record{rs[1], rs[0]}, nil, false); err != nil {
+	if _, err := appendSlotsOrder(nil, []sealrollup.Record{rs[1], rs[0]}, nil, ExactOrders); err != nil {
 		t.Fatal("equal slots rejected", err)
 	}
-	if _, err := appendSlotsOrder(nil, []sealrollup.Record{rs[3], rs[0]}, nil, false); err == nil {
+	if _, err := appendSlotsOrder(nil, []sealrollup.Record{rs[3], rs[0]}, nil, ExactOrders); err == nil {
 		t.Fatal("descending slots accepted")
 	}
 }

@@ -260,10 +260,11 @@ func validateCopiedRollupPart(ctx context.Context, path string, d v2part.Descrip
 	}
 	v2part.RegisterPolicies(d.Coverage.Policies)
 	type limits struct {
-		order  uint64
-		slots  map[uint32]int64
-		meta   *RollupMetadata
-		policy RollupPolicy
+		order   uint64
+		summary bool
+		slots   map[uint32]int64
+		meta    *RollupMetadata
+		policy  RollupPolicy
 	}
 	names := map[v2part.ID]*limits{}
 	err := v2part.Read(ctx, path, &d, func(k v2part.Key, b []byte) error {
@@ -306,6 +307,7 @@ func validateCopiedRollupPart(ctx context.Context, path string, d v2part.Descrip
 			entry.meta = &m
 			return nil
 		}
+		entry.summary = entry.summary || v2part.HasOrderSummary(b)
 		records, err := v2part.DecodeSlots(k.Archive, k.BlockStart, b)
 		if err != nil {
 			return err
@@ -325,6 +327,9 @@ func validateCopiedRollupPart(ctx context.Context, path string, d v2part.Descrip
 	for _, entry := range names {
 		if entry.meta == nil || entry.order > entry.meta.Frontier.Order {
 			return errors.New("copied record lacks its source metadata")
+		}
+		if entry.summary && (len(entry.policy.Config.Archives) != 1 || entry.meta.Version < 4 && entry.meta.ResetOrder != 0) {
+			return errors.New("order summary under history policy or legacy reset")
 		}
 		for archive, slot := range entry.slots {
 			if uint64(archive) >= uint64(len(entry.policy.Config.Archives)) || slot >= entry.policy.Config.Archives[archive].Count {

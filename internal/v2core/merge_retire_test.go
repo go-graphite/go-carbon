@@ -75,6 +75,18 @@ func TestMergeKeepsRecordsTheReaderReturns(t *testing.T) {
 	if mergeDrain(t, o) == 0 || mergeCount(o) >= parts {
 		t.Fatalf("no merge: %d parts", mergeCount(o))
 	}
+	// This fixture fits one run per name and certifies summary output. Its
+	// physical order becomes the run maximum; every sample bit and other
+	// record field must still survive exactly.
+	for _, records := range want {
+		var maximum uint64
+		for _, r := range records {
+			maximum = max(maximum, r.Order)
+		}
+		for i := range records {
+			records[i].Order, records[i].Sample.Sequence = maximum, maximum
+		}
+	}
 	if got := read(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("merge changed records\ngot=%+v\nwant=%+v", got, want)
 	}

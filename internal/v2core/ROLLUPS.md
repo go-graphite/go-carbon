@@ -127,3 +127,32 @@ part identities. Readers own external file handles until their iterator closes;
 committed originals are retained for pinned snapshots, and unpublished originals
 are removed only during exclusive writable startup. Missing committed originals
 are errors, even when older LSM archive versions remain available.
+
+### Summarized orders in native single-archive merges
+
+Dense extension bit `1<<1` replaces a run's row-order column with one unsigned
+maximum. Slot, timestamp, value and correction encoding stay unchanged; aligned
+timestamps are allowed, kinds and exact-order flags are not. Decoding fills the
+existing compatibility Order/Sequence slots with the representative maximum.
+It is a source/envelope bound, never a reconstructed history clock.
+
+The owner selects this mode for a complete output name only in a same-source,
+sequence-adjacent prefix merge whose members all have nonzero descriptor Seq,
+whose policy has exactly one archive, and which has no copied dependencies or
+active legacy order reset (metadata v4, or ResetOrder=0). All resolved output must
+be Raw with Upto=0 and unique physical slots across every run. Every other name
+retains exact orders, including fine rows of multi-archive history. Fresh seals
+and generic converters continue writing exact orders.
+
+Physical replacement uses timestamp, live/copied class, source-local part Seq
+and the established in-part winner. Multi-archive Whisper propagation instead
+needs exact admission/pass clocks and Upto bounds; a run maximum cannot supply
+that history. Readers and portable import reject summaries under history policies
+or active legacy order resets. Old exact runs remain readable, including mixtures
+with summarized parts. Lossless conversion expands the representative and preserves
+that logical input and its receipt digest; only the owner merge certifies elision.
+
+Deploy capable readers, converters and move recipients before enabling these
+writes: older readers reject the new extension. After a summarized part exists,
+rollback requires a capable reader with summary writing disabled; the original
+row clocks cannot be recovered for an arbitrary older reader.

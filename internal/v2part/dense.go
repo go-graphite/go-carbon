@@ -39,10 +39,12 @@ var denseMagic = []byte{'G', 'C', 'D', 1}
 // a 2-bit kind per record (sealrollup.Kind, four per byte, low bits first)
 // and one uvarint upto per Mat or None record (0: a seal's fallback window
 // that bounds no event walk). Runs of single Raw versions keep the older form.
-// The next bit is reserved for per-record order exceptions.
+// extOrderMaximum replaces the order column with one positive run maximum.
+// It is valid only for owner-certified, unique-slot single-archive Raw output.
 const (
-	extKinds = 1 << 0
-	extKnown = extKinds
+	extKinds        = 1 << 0
+	extOrderMaximum = 1 << 1
+	extKnown        = extKinds | extOrderMaximum
 )
 
 const (
@@ -130,12 +132,12 @@ func uvarintLen(v uint64) int { return (bits.Len64(v|1) + 6) / 7 }
 // appendSlots reuses *table, when given, as the value codec's distinct-value
 // table.
 func appendSlots(out []byte, records []sealrollup.Record, table *[]uint64) ([]byte, error) {
-	return appendSlotsOrder(out, records, table, false)
+	return appendSlotsOrder(out, records, table, ExactOrders)
 }
 
 // appendSlotsOrder predicts merged orders from the two endpoints and stores
 // exact zigzag residuals in byte planes. Unsigned arithmetic preserves wraps.
-func appendSlotsOrder(out []byte, records []sealrollup.Record, table *[]uint64, predictOrders bool) ([]byte, error) {
+func appendSlotsOrder(out []byte, records []sealrollup.Record, table *[]uint64, orders OrderEncoding) ([]byte, error) {
 	if len(records) == 0 || len(records) > MaxDenseSlots {
 		return nil, errors.New("invalid dense slot count")
 	}
@@ -149,6 +151,9 @@ func appendSlotsOrder(out []byte, records []sealrollup.Record, table *[]uint64, 
 		}
 		kinds = kinds || r.Kind != sealrollup.KindRaw || i > 0 && r.Slot == records[i-1].Slot
 	}
+	if orders == SummaryOrders && kinds {
+		return nil, errors.New("order summary requires unique Raw slots")
+	}
 	out = append(out, denseMagic...)
 	mode := byte(denseTagged)
 	step := int64(0)
@@ -157,13 +162,18 @@ func appendSlotsOrder(out []byte, records []sealrollup.Record, table *[]uint64, 
 	} else if step = alignedStep(records); step != 0 {
 		mode |= denseAligned
 	}
-	predict := predictOrders && len(records) > 1
+	predict := orders == PredictedOrders && len(records) > 1
+	if orders == SummaryOrders {
+		mode |= denseExtended
+	}
 	if predict {
 		mode |= denseModeOrderLinear
 	}
 	out = append(out, mode)
 	if kinds {
 		out = append(out, extKinds)
+	} else if orders == SummaryOrders {
+		out = append(out, extOrderMaximum)
 	}
 	out = binary.AppendUvarint(out, uint64(len(records)))
 	var slot, ts, dt int64
@@ -182,7 +192,13 @@ func appendSlotsOrder(out []byte, records []sealrollup.Record, table *[]uint64, 
 			dt = delta
 		}
 	}
-	if predict {
+	if orders == SummaryOrders {
+		var maximum uint64
+		for _, r := range records {
+			maximum = max(maximum, r.Order)
+		}
+		out = binary.AppendUvarint(out, maximum)
+	} else if predict {
 		out = appendPredictedOrders(out, records)
 	} else {
 		var prev uint64
@@ -484,13 +500,13 @@ func decodeRun(dst []sealrollup.Record, archive uint32, firstSlot int64, data []
 	if mode&^denseModes != 0 || mode&(denseInteger|denseTagged) == denseInteger|denseTagged || mode&(denseModeOrderDoD|denseModeOrderLinear) == denseModeOrderDoD|denseModeOrderLinear {
 		return nil, bad
 	}
-	aligned, kinds, p := mode&denseAligned != 0, false, data[5:]
+	aligned, kinds, summary, p := mode&denseAligned != 0, false, false, data[5:]
 	if mode&denseExtended != 0 {
 		ext := p[0]
-		if aligned || ext == 0 || ext&^extKnown != 0 {
+		if ext == 0 || ext&^extKnown != 0 || ext&extKinds != 0 && (aligned || ext&extOrderMaximum != 0) || ext&extOrderMaximum != 0 && mode&(denseModeOrderDoD|denseModeOrderLinear) != 0 {
 			return nil, bad
 		}
-		kinds, p = ext&extKinds != 0, p[1:]
+		kinds, summary, p = ext&extKinds != 0, ext&extOrderMaximum != 0, p[1:]
 	}
 	take := func() (uint64, bool) {
 		v, n := binary.Uvarint(p)
@@ -562,7 +578,15 @@ func decodeRun(dst []sealrollup.Record, archive uint32, firstSlot int64, data []
 	}
 	var order uint64
 	var pd int64
-	if mode&denseModeOrderLinear != 0 {
+	if summary {
+		maximum, ok := take()
+		if !ok || maximum == 0 {
+			return nil, bad
+		}
+		for i := range rs {
+			rs[i].Order, rs[i].Sample.Sequence = maximum, maximum
+		}
+	} else if mode&denseModeOrderLinear != 0 {
 		first, ok0 := take()
 		u, ok1 := take()
 		if !ok0 || !ok1 || first == 0 || len(rs) < 2 || len(p) == 0 {
@@ -676,17 +700,42 @@ func decodeRun(dst []sealrollup.Record, archive uint32, firstSlot int64, data []
 type DenseWriter struct {
 	writer *Writer
 	*denseWorkspace
-	err    error
-	closed bool
-	// predictOrders selects the merged order codec.
-	predictOrders bool
-	legacyKinds   bool
+	err         error
+	closed      bool
+	orders      OrderEncoding
+	legacyKinds bool
 }
 
 // PredictOrders replaces the seal order codec with endpoint-predicted byte planes,
 // including copied runs. Decoding is exact. Call before
 // the first Set.
-func (w *DenseWriter) PredictOrders() { w.predictOrders = true }
+func (w *DenseWriter) PredictOrders() { w.orders = PredictedOrders }
+
+// OrderEncoding selects the exact seal, exact merge, or certified summary codec.
+type OrderEncoding uint8
+
+const (
+	ExactOrders OrderEncoding = iota
+	PredictedOrders
+	SummaryOrders
+)
+
+// SetOrderEncoding flushes the preceding name before changing its order codec.
+// SummaryOrders requires the owner certificate described in ROLLUPS.md.
+func (w *DenseWriter) SetOrderEncoding(orders OrderEncoding) error {
+	if w.orders != orders {
+		if err := w.flush(); err != nil {
+			return err
+		}
+		w.orders = orders
+	}
+	return nil
+}
+
+// HasOrderSummary queries the run header; decoding still validates its syntax.
+func HasOrderSummary(data []byte) bool {
+	return len(data) >= 6 && bytes.HasPrefix(data, denseMagic) && data[4]&denseExtended != 0 && data[5]&extOrderMaximum != 0
+}
 
 // LimitBytes bounds compressed staging output, including SST indexes/footer.
 // Call before the first Set. Exceeding it aborts this proposal, never inputs.
@@ -780,7 +829,7 @@ func (w *DenseWriter) flushWith(envelope []byte) error {
 	if w.rawPending {
 		b = append(b, w.raw...)
 	} else {
-		b, e = appendSlotsOrder(b, w.records, &w.distinct, w.predictOrders)
+		b, e = appendSlotsOrder(b, w.records, &w.distinct, w.orders)
 	}
 	w.encoded = b
 	if e == nil {
@@ -871,8 +920,8 @@ func (w *DenseWriter) SetSlotsEncoded(key, value []byte) error {
 	}
 	if err == nil {
 		// A re-encode for predicted orders keeps every version and kind.
-		if legacy || w.predictOrders && value[4]&denseModeOrderLinear == 0 && len(w.records) > 1 {
-			value, err = appendSlotsOrder(w.encoded[:0], w.records, &w.distinct, w.predictOrders && len(w.records) > 1)
+		if legacy || w.orders == SummaryOrders || w.orders == PredictedOrders && value[4]&denseModeOrderLinear == 0 && len(w.records) > 1 {
+			value, err = appendSlotsOrder(w.encoded[:0], w.records, &w.distinct, w.orders)
 			w.encoded = value
 		}
 	}

@@ -119,6 +119,11 @@ func TestOmitBaseRowsRenderDifferential(t *testing.T) {
 						if r.Sample.Time <= clock-archive.Step*archive.Count || r.Sample.Time > clock {
 							return nil
 						}
+						// Single-archive run bounds depend on background merge cadence,
+						// not render values. History and legacy masks keep exact clocks.
+						if len(policy.Config.Archives) == 1 && (meta.Version >= 4 || meta.ResetOrder == 0) {
+							r.Order, r.Sample.Sequence = 0, 0
+						}
 						r.Correction = false // placement hint, not a value
 						rs = append(rs, r)
 						return nil
