@@ -1,7 +1,9 @@
 package v2daemon
 
 import (
+	"context"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -97,6 +99,46 @@ func TestRecoveredRegistrationReusesBoundHandle(t *testing.T) {
 	if calls != 1 || rejected != 1 || p.catalog.Count() != 1 || p.pendingRows != 1 {
 		t.Fatalf("new admission bypassed resolver: calls=%d rejected=%d catalog=%d pending=%d", calls, rejected, p.catalog.Count(), p.pendingRows)
 	}
+	// Exercise the recovered handle through pending classification and the
+	// installed fingerprint table, then recover its sealed metadata again.
+	data[0].Value = math.Float64frombits(0x8000000000000000)
+	if err = o.Append([]string{name}, nil, data, nil, 1020); err != nil {
+		t.Fatal(err)
+	}
+	if err = p.Drain(); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Core.AppendBatches(0, nil, p.cursor, true); err != nil {
+		t.Fatal(err)
+	}
+	checkSealed := func() {
+		t.Helper()
+		pin := s.Core.DBs()[0].NewSnapshot()
+		defer pin.Close()
+		snapshot, err := v2core.NewRollupSnapshot(context.Background(), pin, nil, cfg.Hooks.Identities, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, meta, ok := snapshot.LookupMetadata(name)
+		if !ok || meta.ID != NumericID(1, 0, 1) || meta.Frontier.Order != p.applyOrder {
+			t.Fatalf("recovered receiver lost installed metadata: ok=%v meta=%+v order=%d", ok, meta, p.applyOrder)
+		}
+		records, err := snapshot.Records(context.Background(), name)
+		if err != nil || len(records) != 1 || records[0].Sample.Time != 1000 || records[0].Sample.Bits != 0x8000000000000000 {
+			t.Fatalf("recovered receiver changed sealed point: records=%+v err=%v", records, err)
+		}
+	}
+	checkSealed()
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Hooks.Identities = &v2core.PolicyCatalog{}
+	s, err = Open(root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p = s.Producers[0]
+	checkSealed()
 }
 
 // A live classic writer still needs current-policy validation at admission.
