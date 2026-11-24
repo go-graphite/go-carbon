@@ -607,6 +607,10 @@ func readyRestartWindows(before, after map[string]readyProcess) syncRanges {
 // Independent reads take the 100 lowest stable name hashes per source and
 // for target read-back, so disjoint donor catalogs retain meaningful minima.
 func readyChecks(ctx context.Context, o syncOptions, r syncReadyOptions, b syncReadyBackend, state string, report *readyReport) error {
+	scope := &syncer{o: o}
+	if err := scope.initOwnership(); err != nil {
+		return err
+	}
 	if err := frontierReadyBounds(o, r, report); err != nil {
 		return err
 	}
@@ -703,7 +707,7 @@ func readyChecks(ctx context.Context, o syncOptions, r syncReadyOptions, b syncR
 		if e != nil {
 			return e
 		}
-		if mask == 0 && o.namesFile == "" || o.issues.excluded(name) || len(recheck) > 0 && !recheck[name] {
+		if !scope.ownsSyncName(name, mask) || mask == 0 && o.namesFile == "" || o.issues.excluded(name) || len(recheck) > 0 && !recheck[name] {
 			continue
 		}
 		batch = append(batch, name)

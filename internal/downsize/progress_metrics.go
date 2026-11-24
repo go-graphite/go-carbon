@@ -247,6 +247,7 @@ type progressMetrics struct {
 	addr, prefix, phase                   string
 	active, done, total, rate             float64
 	quarantined, policySkipped            float64
+	ownershipExcluded                     float64
 	redoEnabled                           bool
 	redoNames                             map[string]int64
 	redoByPath                            map[string]map[string]int64
@@ -330,6 +331,7 @@ func (p *progressMetrics) observe(path string, snapshot progressSnapshot) {
 	p.legacyReverified[path] = snapshot.LegacyReverified
 	p.quarantined = max(p.quarantined, float64(snapshot.Quarantined))
 	p.policySkipped = max(p.policySkipped, float64(snapshot.PolicySkipped))
+	p.ownershipExcluded = float64(snapshot.OwnershipExcluded)
 	p.snapshot = snapshot
 	p.phaseRegressions = max(p.phaseRegressions, snapshot.PhaseRegressions)
 	if p.ambiguousReceiptNames == nil {
@@ -389,6 +391,7 @@ func (p *progressMetrics) send() {
 	redoNames := cloneRedoCounts(p.redoNames)
 	redoEnabled := p.redoEnabled || p.redoNames != nil
 	quarantined, policySkipped := p.quarantined, p.policySkipped
+	ownershipExcluded := p.ownershipExcluded
 	at := time.Now()
 	eta := p.eta(at)
 	ready := p.ready.estimate(at, p.path, p.snapshot)
@@ -408,6 +411,7 @@ func (p *progressMetrics) send() {
 	fmt.Fprintf(&b, "%s.legacy_revalidated_names %d %d\n", p.prefix, legacyRevalidated, now)
 	fmt.Fprintf(&b, "%s.ambiguous_receipt_names %d %d\n%s.receipt_contradictions %d %d\n", p.prefix, ambiguousReceiptNames, now, p.prefix, receiptContradictions, now)
 	fmt.Fprintf(&b, "%s.phase_regressions %d %d\n", p.prefix, phaseRegressions, now)
+	fmt.Fprintf(&b, "%s.ownership_excluded %g %d\n", p.prefix, ownershipExcluded, now)
 	if p.lastSentPhase != "" && p.lastSentPhase != phase {
 		fmt.Fprintf(&b, "%s.%s.active 0 %d\n%s.%s.names_per_second 0 %d\n", p.prefix, p.lastSentPhase, now, p.prefix, p.lastSentPhase, now)
 	}

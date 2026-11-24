@@ -196,6 +196,9 @@ func readyFrontier(ctx context.Context, o syncOptions, b syncBackend, seal bool)
 		return false, nil, nil
 	}
 	s := &syncer{o: o, b: b}
+	if err := s.initOwnership(); err != nil {
+		return false, nil, err
+	}
 	f := &syncFrontier{}
 	path := filepath.Join(o.state, "verification-scope.json")
 	if err := readReadyObservationJSON(path, &f.scope); err != nil {
@@ -239,14 +242,14 @@ func readyFrontier(ctx context.Context, o syncOptions, b syncBackend, seal bool)
 		var names []string
 		var ids []int64
 		for len(names) < o.batch {
-			name, _, e := source.next()
+			name, mask, e := source.next()
 			if errors.Is(e, io.EOF) {
 				break
 			}
 			if e != nil {
 				return false, nil, e
 			}
-			if o.issues.excluded(name) {
+			if !s.ownsSyncName(name, mask) || o.issues.excluded(name) {
 				continue
 			}
 			names = append(names, name)

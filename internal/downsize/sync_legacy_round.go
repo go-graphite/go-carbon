@@ -58,9 +58,11 @@ type legacyRoundSpan struct {
 	row        int
 }
 type legacyRoundProgress struct {
-	rows   []syncRow
-	spans  []legacyRoundSpan
-	cursor int
+	rows     []syncRow
+	spans    []legacyRoundSpan
+	cursor   int
+	owned    func(string) bool
+	unscoped *legacyRoundProgress
 }
 type legacyRowHeap []int
 
@@ -84,14 +86,8 @@ func (s *syncer) legacyRoundProgress(round int) (*legacyRoundProgress, error) {
 }
 
 // Reconstruct observations without reading stores or replaying completed fills.
-func (s *syncer) legacyRoundReceipts(round int, newest, recordBoundary bool) (*legacyRoundProgress, error) {
-	p := &legacyRoundProgress{}
-	type edge struct {
-		name  string
-		row   int
-		start bool
-	}
-	var edges []edge
+func (s *syncer) legacyRoundReceipts(round int, newest, recordBoundary bool, includeScoped ...bool) (*legacyRoundProgress, error) {
+	p := &legacyRoundProgress{owned: s.owner}
 	scopeSeen, adopted := false, false
 	original := map[string]int{}
 	for _, r := range s.j.find(func(r syncRow) bool {
@@ -105,7 +101,7 @@ func (s *syncer) legacyRoundReceipts(round int, newest, recordBoundary bool) (*l
 		}
 		// Intermediate binaries may have verified source-only batches. Their
 		// bounds do not prove the interleaved target-only members were visited.
-		if scopeSeen && !adopted {
+		if scopeSeen && !adopted && !(len(includeScoped) > 0 && includeScoped[0]) {
 			continue
 		}
 		if r.Kind != "verified" || r.Round != round {
@@ -130,7 +126,32 @@ func (s *syncer) legacyRoundReceipts(round int, newest, recordBoundary bool) (*l
 			p.rows[i], p.rows[k] = p.rows[k], p.rows[i]
 		}
 	}
+	p.compileSpans(false)
+	if s.owner != nil {
+		p.unscoped = &legacyRoundProgress{rows: p.rows}
+		p.unscoped.compileSpans(true)
+	}
+	if !adopted && recordBoundary {
+		if err := s.j.append(syncRow{Kind: "legacy-round-adoption", Round: round}); err != nil {
+			return nil, err
+		}
+	}
+	return p, nil
+}
+
+// Ring filtering is deterministic. Two range indexes retain broad historical
+// receipts for non-owned names without storing one edge per catalog name.
+func (p *legacyRoundProgress) compileSpans(skipOwned bool) {
+	type edge struct {
+		name  string
+		row   int
+		start bool
+	}
+	var edges []edge
 	for i, r := range p.rows {
+		if skipOwned && r.OwnershipScoped {
+			continue
+		}
 		// Sparse repair batches can straddle names whose newer observations
 		// were already adopted. Their bounds cannot overwrite those names.
 		if r.SelectionComplete {
@@ -164,23 +185,23 @@ func (s *syncer) legacyRoundReceipts(round int, newest, recordBoundary bool) (*l
 		}
 		prev = name
 	}
-	if !adopted && recordBoundary {
-		if err := s.j.append(syncRow{Kind: "legacy-round-adoption", Round: round}); err != nil {
-			return nil, err
-		}
-	}
-	return p, nil
 }
 func (p *legacyRoundProgress) owner(name string) int {
+	if p.unscoped != nil && !p.owned(name) {
+		return p.unscoped.owner(name)
+	}
 	i := sort.Search(len(p.spans), func(i int) bool { return p.spans[i].end > name })
 	if i < len(p.spans) && p.spans[i].first <= name {
 		return p.spans[i].row
 	}
 	return -1
 }
-func (p *legacyRoundProgress) contains(name string) bool {
+func (p *legacyRoundProgress) contains(name string, mask ...uint64) bool {
 	if p == nil {
 		return false
+	}
+	if p.unscoped != nil && (!p.owned(name) || len(mask) > 0 && mask[0] == 0) {
+		return p.unscoped.contains(name)
 	}
 	for p.cursor < len(p.spans) && p.spans[p.cursor].end <= name {
 		p.cursor++

@@ -16,8 +16,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/go-graphite/go-carbon/internal/downsize/ringplan"
 )
 
 // storectl sync brings one target store to complete history from every
@@ -193,6 +191,7 @@ type syncRow struct {
 	Resolved              []syncSkip               `json:"resolved,omitempty"`
 	Discovery             *syncDiscoveryCheckpoint `json:"discovery,omitempty"`
 	Selected              []string                 `json:"selected,omitempty"`
+	OwnershipScoped       bool                     `json:"ownership_scoped,omitempty"`
 	SelectionComplete     bool                     `json:"selection_complete,omitempty"`
 	Kind                  string                   `json:"kind"`
 	Identity              string                   `json:"identity,omitempty"`
@@ -454,10 +453,8 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) (result error) {
 	if err := s.prepareVerificationRetry(); err != nil {
 		return err
 	}
-	if o.ring != "" {
-		if s.owner, err = ringplan.TargetOwner(o.ring, o.to); err != nil {
-			return err
-		}
+	if err := s.initOwnership(); err != nil {
+		return err
 	}
 	// Authorization is live configuration. A source rejected by a previous
 	// invocation must be probed again after its allowlist has been repaired.
@@ -772,8 +769,33 @@ func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, nam
 	}
 	source := s.o.from[src]
 	original := append([]string(nil), names...)
+	retained := map[string]bool{}
+	if s.owner != nil && phase == "fill" && !s.windowOnly() {
+		// Keep the historical parent identity. If an old broad transport was
+		// interrupted, carry its completed owned imports into the narrowed
+		// selection before creating any new transport journal.
+		journal, err := s.namesFile("fill-"+repair, round, src, append([]string(nil), original...))
+		if err != nil {
+			return syncCopyResult{}, err
+		}
+		pending, err := copyJournalFailures(journal, source, original)
+		if err != nil {
+			return syncCopyResult{}, err
+		}
+		for _, n := range original {
+			if s.owner(n) {
+				retained[n] = true
+			}
+		}
+		for _, n := range pending {
+			delete(retained, n)
+		}
+	}
 	eligible := make([]string, 0, len(names))
 	for _, n := range names {
+		if s.owner != nil && !s.owner(n) || retained[n] {
+			continue
+		}
 		skip, e := s.excludePolicy(n, phase)
 		if e != nil {
 			return syncCopyResult{}, e
@@ -789,6 +811,13 @@ func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, nam
 	var resolved []syncSkip
 	var selected []string
 	for _, n := range names {
+		if s.owner != nil && !s.owner(n) {
+			resolved = append(resolved, syncSkip{n, "outside_ring_ownership"})
+			continue
+		}
+		if retained[n] {
+			continue
+		}
 		skip, e := s.excludePolicy(n, phase)
 		if e != nil {
 			return syncCopyResult{}, e
@@ -814,10 +843,14 @@ func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, nam
 		copyPhase = fmt.Sprintf("%s-policy-%x", copyPhase, hash[:8])
 	}
 	if len(names) == 0 {
-		if err := s.j.append(syncRow{Kind: "copied", Identity: repair, Phase: phase, Round: round, Source: source, First: original[0], Last: original[len(original)-1], Names: len(original), Selected: original, Resolved: resolved, SelectionComplete: s.windowOnly()}); err != nil {
+		if err := s.j.append(syncRow{Kind: "copied", Identity: repair, Phase: phase, Round: round, Source: source, First: original[0], Last: original[len(original)-1], Names: len(original), Copied: len(retained), Selected: original, Resolved: resolved, SelectionComplete: s.windowOnly()}); err != nil {
 			return syncCopyResult{}, err
 		}
-		return syncCopyResult{ExpectedAbsent: original}, nil
+		res := syncCopyResult{Copied: len(retained)}
+		for _, r := range resolved {
+			res.ExpectedAbsent = append(res.ExpectedAbsent, r.Name)
+		}
+		return res, nil
 	}
 	// The caller owns phase progress; a source batch must not reset its totals
 	// or replace a stable phase with an immutable per-batch journal identity.
@@ -851,6 +884,7 @@ func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, nam
 	if err != nil {
 		return res, err
 	}
+	res.Copied += len(retained)
 	if res.Forbidden {
 		s.forbid[source] = true
 		event("sync_source_forbidden", map[string]any{"level": "error", "source": source, "target": s.o.to, "hint": "the target transfer-sources allowlist does not list this source; continuing with the others"})
@@ -885,6 +919,9 @@ func (s *syncer) sourcesOf(mask uint64) string {
 }
 
 func (s *syncer) addResidual(h syncHole, reason string) {
+	if s.owner != nil && !s.owner(h.Name) {
+		return
+	}
 	s.sum.residual = append(s.sum.residual, syncResidual{h, reason})
 }
 
@@ -1030,7 +1067,11 @@ func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
 		for _, k := range skipped { // retried once more in the next round
 			next[k.Name] = true
 		}
-		event("sync_round", map[string]any{"round": round, "verified": names.total, "full_union": fullUnion, "holes": len(holes), "fillable": fillable, "unindexed": len(unindexed), "skipped": len(skipped)})
+		verifiedNames := names.total
+		for _, r := range s.j.find(func(r syncRow) bool { return r.Kind == "ownership-scope" && r.Round == journalRound }) {
+			verifiedNames = r.Names
+		}
+		event("sync_round", map[string]any{"round": round, "verified": verifiedNames, "catalog_candidates": names.total, "full_union": fullUnion, "holes": len(holes), "fillable": fillable, "unindexed": len(unindexed), "skipped": len(skipped)})
 		score := int64(len(unindexed) + len(skipped))
 		for _, h := range holes {
 			score += int64(max(1, h.Points))
@@ -1221,6 +1262,15 @@ func (s *syncer) sourceIndex(source string) int {
 func (s *syncer) verifyRound(ctx context.Context, round int, set syncNameSource) ([]syncHole, []string, []syncSkip, error) {
 	journalRound := round + s.verificationBase
 	if s.phaseBeforeResume("verify", journalRound) && !(journalRound == s.resume.Round && s.adoptingLegacyRound()) {
+		if s.owner != nil && !s.o.restartWindow && !s.windowOnly() && !s.o.rescanAll {
+			if err := s.loadLegacyInvalidations(); err != nil {
+				set.close()
+				return nil, nil, nil, err
+			}
+			if len(s.legacyInvalidations) == 0 {
+				return s.replayOwnedRound(ctx, journalRound, set)
+			}
+		}
 		return s.replayVerifyRound(ctx, journalRound, set)
 	}
 	repairScope := s.legacyRepairScope(journalRound)
@@ -1245,6 +1295,24 @@ func (s *syncer) verifyRound(ctx context.Context, round int, set syncNameSource)
 		}
 	}
 	if err := s.loadLegacyInvalidations(); err != nil {
+		set.close()
+		return nil, nil, nil, err
+	}
+	// A ring-scope upgrade retains every completed observation in the current
+	// round. Keep original traversal membership for old receipts; new sparse
+	// receipts retain ring-filtered range membership. Destructive invalidations use
+	// the existing selective revalidation path.
+	if s.owner != nil && journalRound == s.resume.Round && !s.windowOnly() && !s.o.restartWindow && !s.o.rescanAll && len(s.legacyInvalidations) == 0 {
+		legacy, err = s.legacyRoundReceipts(journalRound, true, false, true)
+		if err == nil && repairScope != nil {
+			legacy = legacy.restrict(repairScope.Selected)
+		}
+		if err != nil {
+			set.close()
+			return nil, nil, nil, err
+		}
+	}
+	if err := s.narrowOwnedRound(ctx, journalRound, &set, legacy); err != nil {
 		set.close()
 		return nil, nil, nil, err
 	}
@@ -1347,6 +1415,7 @@ func (s *syncer) verifyRound(ctx context.Context, round int, set syncNameSource)
 					if repairScope != nil && !s.o.rescanAll {
 						row.Selected, row.SelectionComplete = jb.names, true
 					}
+					row.OwnershipScoped = s.owner != nil && !row.SelectionComplete
 					row.Work = s.redo.cleanWork(workCtx, row)
 					err = s.j.append(row)
 				}
@@ -1381,19 +1450,26 @@ feed:
 				feedErr = err
 				break feed
 			}
+			if legacy.contains(name, mask) {
+				s.prog.done.Add(1)
+				s.prog.replayed.Add(1)
+				resumed++
+				fed++
+				// Keep new range receipts from crossing an older observation.
+				if len(chunk.names) > 0 {
+					break
+				}
+				continue
+			}
+			if !s.ownsSyncName(name, mask) {
+				continue
+			}
 			skip, e := s.excludePolicy(name, "verify")
 			if e != nil {
 				feedErr = e
 				break feed
 			}
 			if skip {
-				continue
-			}
-			if legacy.contains(name) {
-				s.prog.done.Add(1)
-				s.prog.replayed.Add(1)
-				resumed++
-				fed++
 				continue
 			}
 			chunk.names = append(chunk.names, name)
@@ -1453,6 +1529,7 @@ feed:
 	}
 	event("sync_verified", map[string]any{"round": round, "names": fed - frontierReused, "candidate_names": fed, "proof_reused": frontierReused, "resumed": resumed, "hole_names": len(holeNames), "hole_points": points, "unindexed": len(unindexed), "skipped": len(skipped),
 		"compared_by_digest": s.prog.digests.Load(), "read_point_by_point": s.prog.reads.Load()})
+	holes, unindexed, skipped = s.ownedResults(journalRound, holes, unindexed, skipped)
 	return holes, unindexed, skipped, nil
 }
 

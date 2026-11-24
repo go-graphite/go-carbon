@@ -170,6 +170,11 @@ func (s *syncer) replayVerifyRound(ctx context.Context, round int, set syncNameS
 		pendingIDs := make([]int64, 0, len(ids))
 		pendingMasks := make([]uint64, 0, len(masks))
 		for i, n := range names {
+			// A destructive or ambiguous historical receipt cannot expand
+			// recovery beyond the target's current ring responsibility.
+			if !s.ownsSyncName(n, masks[i]) {
+				continue
+			}
 			if r := repaired[n]; r != nil {
 				row := syncRow{Holes: r.holes, Skipped: r.skipped}
 				if r.unindexed {

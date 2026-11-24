@@ -102,7 +102,10 @@ func (s *syncer) prepareLegacyRepair(set []string, scoped bool, filled map[syncK
 // observations suppress earlier dirty results, and unrelated union names never
 // become pending work or leak into the residual report.
 func (p *legacyRoundProgress) restrict(names []string) *legacyRoundProgress {
-	q := &legacyRoundProgress{rows: p.rows}
+	q := &legacyRoundProgress{rows: p.rows, owned: p.owned}
+	if p.unscoped != nil {
+		q.unscoped = p.unscoped.restrict(names)
+	}
 	for _, n := range names {
 		if i := p.owner(n); i >= 0 {
 			q.spans = append(q.spans, legacyRoundSpan{n, n + "\x00", i})

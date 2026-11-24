@@ -111,6 +111,7 @@ type progressSnapshot struct {
 	RedoNames                map[string]int64     `json:"redo_names,omitempty"`
 	Quarantined              int64                `json:"quarantined"`
 	PolicySkipped            int64                `json:"policy_skipped"`
+	OwnershipExcluded        int64                `json:"ownership_excluded"`
 	RepairFailedNames        int64                `json:"repair_failed_names"`         // distinct names still missing after an accepted fill
 	NextVerifyNames          *int64               `json:"next_verify_names,omitempty"` // distinct names after this fill; nil until planned
 	WaitingForStore          bool                 `json:"waiting_for_store"`
@@ -139,6 +140,8 @@ func (p *progressSnapshot) apply(r syncRow) {
 		p.Discovered = int64(r.Discovery.Names)
 	}
 	switch r.Kind {
+	case "ownership-scope":
+		p.OwnershipExcluded = int64(r.NotOwned)
 	case "ambiguous-receipt":
 		p.AmbiguousReceiptNames += int64(r.Names)
 	case "receipt-contradiction":
