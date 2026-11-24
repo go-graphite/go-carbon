@@ -135,6 +135,10 @@ type nativeIntent struct {
 }
 
 func (s *Store) nativeDiskCheck() error {
+	// A stopped read-only source never builds SSTs or allocates store files.
+	if s.readOnly {
+		return nil
+	}
 	usage, err := s.fs.GetDiskUsage(s.dir)
 	if errors.Is(err, vfs.ErrUnsupported) {
 		return nil

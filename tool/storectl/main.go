@@ -58,6 +58,8 @@ func main() {
 func run(args []string) error {
 	if len(args) > 0 {
 		switch args[0] {
+		case "serve-readonly":
+			return serveReadOnly(args[1:])
 		case "maintain":
 			return maintain(args[1:])
 		case "inventory":

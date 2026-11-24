@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"sync"
@@ -50,6 +51,7 @@ type syncLiveBackend struct {
 	client               *http.Client
 	copy                 func(context.Context, copyOptions) error
 	listLimit            atomic.Int64 // learned catalog page cap after a truncated JSON response
+	readOnlyOrigins      sync.Map     // origin -> bool, advertised source read API
 	infoLimits           sync.Map     // store -> *atomic.Int64, learned metadata request cap
 	bytes                atomic.Int64 // response bytes read for verification
 	waiting              atomic.Int64
@@ -138,6 +140,7 @@ func newSyncLiveBackend(o syncLiveOptions) *syncLiveBackend {
 	b := &syncLiveBackend{o: o, m: m, client: &http.Client{Timeout: 10 * time.Minute, Transport: storehttp.NewTransport(&http.Transport{MaxIdleConnsPerHost: 64})}, copy: planFreeCopy}
 
 	restarted := func(origin string) {
+		b.readOnlyOrigins.Delete(origin)
 		b.m.binaryProofs.Delete(origin)
 		b.windowSelectionSlots.Delete(origin)
 		b.windowRestarted.Store(true)
@@ -169,6 +172,30 @@ func (b *syncLiveBackend) carbon(store string) (string, error) {
 		return "", err
 	}
 	return u.Scheme + "://" + net.JoinHostPort(u.Hostname(), strconv.Itoa(b.o.carbonPort)), nil
+}
+
+// A stopped source has no carbonserver. Its authenticated buckyd listener also
+// provides exact-name v3 reads; ordinary daemons retain their carbonserver port.
+func (b *syncLiveBackend) readBase(ctx context.Context, store string) (string, error) {
+	if !slices.Contains(b.o.authOrigins, store) {
+		return b.carbon(store)
+	}
+	value, ok := b.readOnlyOrigins.Load(store)
+	if !ok {
+		var status struct{ ReadOnlySource bool }
+		if err := b.wait(ctx, "source read API", store, func() error {
+			_, err := b.m.requestOnce(ctx, store, "/v1/transfer/status", nil, &status)
+			return err
+		}); err != nil {
+			return "", err
+		}
+		value = status.ReadOnlySource
+		b.readOnlyOrigins.Store(store, value)
+	}
+	if value.(bool) {
+		return store, nil
+	}
+	return b.carbon(store)
 }
 
 type syncHTTPError struct {
@@ -489,7 +516,7 @@ func (b *syncLiveBackend) SumDigest(ctx context.Context, store string, names []s
 func (b *syncLiveBackend) Info(ctx context.Context, store string, names []string) (map[string][]syncArchive, error) {
 	ctx, cancel := b.readContext(ctx)
 	defer cancel()
-	base, err := b.carbon(store)
+	base, err := b.readBase(ctx, store)
 	if err != nil {
 		return nil, err
 	}
@@ -567,7 +594,7 @@ func syncInfoTooLarge(err error) bool {
 func (b *syncLiveBackend) Fetch(ctx context.Context, store string, names []string, from, until int64) (map[string]syncSeries, error) {
 	ctx, cancel := b.readContext(ctx)
 	defer cancel()
-	base, err := b.carbon(store)
+	base, err := b.readBase(ctx, store)
 	if err != nil {
 		return nil, err
 	}

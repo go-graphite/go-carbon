@@ -344,10 +344,15 @@ func SyncMain(ctx context.Context, args []string) error {
 	defer backend.m.client.CloseIdleConnections()
 	if c.cacheGuard > 0 && !c.sync.noCopy {
 		urls := map[string]string{}
-		for _, store := range append(append([]string(nil), c.sync.from...), c.sync.to) {
-			carbon, err := backend.carbon(store)
+		for _, store := range append([]string{c.sync.to}, c.sync.from...) {
+			carbon, err := backend.readBase(ctx, store)
 			if err != nil {
 				return err
+			}
+			// A stopped source has no write cache. Do not let its absent
+			// carbonserver prevent the live target's governor from recovering.
+			if readonly, ok := backend.readOnlyOrigins.Load(store); ok && readonly.(bool) {
+				continue
 			}
 			urls[store] = carbon + "/admin/info?scopes=cache"
 		}
