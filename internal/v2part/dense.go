@@ -154,6 +154,10 @@ func appendSlotsOrder(out []byte, records []sealrollup.Record, table *[]uint64, 
 	if orders == SummaryOrders && kinds {
 		return nil, errors.New("order summary requires unique Raw slots")
 	}
+	// A singleton's exact order already is its maximum; omit the redundant tag.
+	if orders == SummaryOrders && len(records) == 1 {
+		orders = ExactOrders
+	}
 	out = append(out, denseMagic...)
 	mode := byte(denseTagged)
 	step := int64(0)

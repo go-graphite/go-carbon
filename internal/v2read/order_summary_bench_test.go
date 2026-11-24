@@ -40,6 +40,8 @@ func (s *summaryBenchSource) Scan(_ context.Context, _ uint64, _ Archive, _, _ i
 }
 
 func BenchmarkOrderSummaryDecodeRender(b *testing.B) {
+	// Singleton summary requests have the identical exact encoding: the only
+	// order is already the maximum, so there is no extension tag to decode.
 	const base int64 = 1800000000
 	for _, n := range []int{1, 4, 64, 1024} {
 		for _, codec := range []struct {
