@@ -174,7 +174,7 @@ func TestOTLPPushMatchesReport(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(conf), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	in := newIngest(t, nil)
+	in := newIngest(t, local.set)
 	o := testOptions(local, in.ln.Addr().String(), rep)
 	o.batch, o.workers, o.replicaRPS = 10, 1, 8 // about 0.5s: several interval pushes
 	o.otlpEndpoint, o.otlpInterval, o.carbonConfig = recv.srv.URL, 40*time.Millisecond, cfgPath
@@ -222,7 +222,7 @@ func TestOTLPPushMatchesReport(t *testing.T) {
 		t.Errorf("final push %v", final)
 	}
 	// Cumulative sums never decrease between pushes.
-	gauges := map[string]bool{"replica_backfill_running|mode=write": true, "replica_backfill_metrics_planned": true, "replica_backfill_write_paused": true}
+	gauges := map[string]bool{"replica_backfill_running|mode=write": true, "replica_backfill_metrics_planned": true, "replica_backfill_write_paused": true, "replica_backfill_points_unconfirmed": true}
 	for i := 1; i < len(pushes); i++ {
 		for k, v := range pushes[i-1] {
 			if !gauges[k] && pushes[i][k] < v {
@@ -239,7 +239,7 @@ func TestOTLPPushFailureIsNotFatal(t *testing.T) {
 	rep.fill("x", base, func(int64) float64 { return 2 }, nil)
 	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "down", http.StatusServiceUnavailable) }))
 	defer dead.Close()
-	in := newIngest(t, nil)
+	in := newIngest(t, local.set)
 	o := testOptions(local, in.ln.Addr().String(), rep)
 	o.otlpEndpoint, o.otlpInterval = dead.URL, 10*time.Millisecond
 	if r := runOK(t, o); r.Write["points_sent"] != 1 {

@@ -62,6 +62,9 @@ type options struct {
 	writeRate, flushPt int
 	maxWritePoints     int64
 	writeRetries       int
+	confirmRetries     int
+	confirmDelay       time.Duration
+	confirmTimeout     time.Duration
 	cachePause         float64
 	cacheResume        float64
 	checkpoint         string
@@ -148,6 +151,9 @@ func parseFlags(args []string) (*options, error) {
 	fs.IntVar(&o.flushPt, "flush-points", 5000, "points per write to -ingest")
 	fs.Int64Var(&o.maxWritePoints, "max-write-points", 0, "maximum points attempted on the receiver socket, including retries (0: unlimited)")
 	fs.IntVar(&o.writeRetries, "write-retries", 20, "reconnect attempts per write to -ingest before giving up (backoff as for requests)")
+	fs.IntVar(&o.confirmRetries, "confirm-retries", 20, "retries of unconfirmed batches before failing; each retry backs off and halves the shared write rate")
+	fs.DurationVar(&o.confirmDelay, "confirm-delay", time.Second, "initial wait before reading back writes, doubled on missing points up to -max-backoff")
+	fs.DurationVar(&o.confirmTimeout, "confirm-timeout", 10*time.Minute, "maximum time per batch for writing, reading back and retrying")
 	fs.Float64Var(&o.cachePause, "cache-pause", 0.5, "pause writes while the local cache is above this fraction of max-size (needs -heartbeat-file; 0 disables)")
 	fs.Float64Var(&o.cacheResume, "cache-resume", 0, "resume below this fraction (default 80% of -cache-pause)")
 	fs.StringVar(&o.checkpoint, "checkpoint", "", "checkpoint file; a restarted run with the same window skips finished metrics")
@@ -172,6 +178,10 @@ func parseFlags(args []string) (*options, error) {
 		return nil, errors.New("-since-unclean-start excludes -from, -since and -until")
 	case !o.uncleanStart && (o.from == "") == (o.since <= 0):
 		return nil, errors.New("give exactly one of -from, -since or -since-unclean-start")
+	case o.confirmTimeout <= 0:
+		return nil, errors.New("-confirm-timeout must be positive")
+	case o.confirmRetries < 0 || o.confirmDelay <= 0 || o.maxBack < o.confirmDelay:
+		return nil, errors.New("-confirm-retries must be nonnegative and 0 < -confirm-delay <= -max-backoff")
 	case o.maxWritePoints < 0:
 		return nil, errors.New("-max-write-points must be nonnegative")
 	case o.cachePause < 0 || o.cachePause > 1 || o.cacheResume < 0 || o.cacheResume > 1:
@@ -378,8 +388,12 @@ func (e *engine) report(from, until int64, began time.Time, err error) report {
 	if e.out != nil {
 		w := &e.out.stats
 		r.Write = map[string]int64{
-			"points_attempted": w.attempted.Load(),
-			"points_sent":      w.points.Load(), "bytes": w.bytes.Load(), "flushes": w.flushes.Load(),
+			"points_attempted":               w.attempted.Load(),
+			"points_unconfirmed":             s.submitted.Load() - s.confirmed.Load(),
+			"unconfirmed_point_observations": s.unconfirmedObservations.Load(),
+			"resent_batches":                 s.resentBatches.Load(), "points_resent": s.resentPoints.Load(),
+			"confirmation_failures": s.confirmationFailures.Load(),
+			"points_sent":           s.confirmed.Load(), "points_written_socket": w.points.Load(), "bytes": w.bytes.Load(), "flushes": w.flushes.Load(),
 			"reconnects": w.reconnects.Load(), "cache_pauses": w.pauses.Load(),
 			"paused_seconds": int64(time.Duration(w.pausedNanos.Load()).Seconds()),
 		}
@@ -413,6 +427,7 @@ func run(ctx context.Context, o *options, now time.Time) (report, error) {
 			from: from, until: until, lookback: int64(o.lookback / time.Second),
 			batch: o.batch, workers: o.workers, dryRun: o.dryRun, printGaps: o.printGaps,
 			checkpoint: o.checkpoint, progress: o.progress,
+			confirmRetries: o.confirmRetries, confirmDelay: o.confirmDelay, maxBackoff: o.maxBack, confirmTimeout: o.confirmTimeout,
 		},
 		local: newClient(strings.TrimRight(o.local, "/"), o, localLim),
 	}
@@ -488,7 +503,7 @@ func realMain() int {
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(r)
 	if err != nil {
-		log.Print(err)
+		log.Printf("ERROR: %v", err)
 		return 1
 	}
 	return 0

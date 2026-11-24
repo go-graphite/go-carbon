@@ -100,7 +100,7 @@ func TestWriteCapFlagAndRun(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "max-write-points") {
 		t.Fatal("run did not fail on cap", err)
 	}
-	if report.Write["points_sent"] != 1 || report.Write["points_attempted"] != 1 {
+	if report.Write["points_sent"] != 0 || report.Write["points_written_socket"] != 1 || report.Write["points_attempted"] != 1 {
 		t.Fatalf("write report %v", report.Write)
 	}
 	rep.mu.Lock()

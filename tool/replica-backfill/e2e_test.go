@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -62,7 +64,7 @@ func writeWhisper(t *testing.T, root, name string, pts map[int64]float64) {
 	}
 }
 
-func startCarbonserver(t *testing.T, root string, cacheGet func(string) []points.Point, want int) string {
+func startCarbonserver(t *testing.T, root string, cacheGet func(string) []points.Point, want int, cacheMode ...bool) string {
 	t.Helper()
 	l := carbonserver.NewCarbonserverListener(cacheGet)
 	l.SetWhisperData(root)
@@ -73,6 +75,10 @@ func startCarbonserver(t *testing.T, root string, cacheGet func(string) []points
 	l.SetMaxMetricsGlobbed(30000)
 	l.SetMaxMetricsRendered(1000)
 	l.SetQueryCacheEnabled(false)
+	if len(cacheMode) > 0 {
+		l.SetQueryCacheEnabled(true)
+		l.SetQueryCacheCanonicalKeys(cacheMode[0])
+	}
 	l.SetFindCacheEnabled(false)
 	if err := l.Listen("127.0.0.1:0"); err != nil {
 		t.Fatal(err)
@@ -90,6 +96,37 @@ func startCarbonserver(t *testing.T, root string, cacheGet func(string) []points
 			t.Fatalf("carbonserver index not ready: %v %v", names, err)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestConfirmationBypassesRealRenderCache(t *testing.T) {
+	for _, canonical := range []bool{false, true} {
+		t.Run(fmt.Sprintf("canonical=%v", canonical), func(t *testing.T) {
+			t.Parallel()
+			from := time.Now().Unix()/60*60 - 180
+			root := t.TempDir()
+			writeWhisper(t, root, "cached.metric", map[int64]float64{from - 60: 1})
+			cache := &memCache{pts: map[string][]points.Point{}}
+			url := startCarbonserver(t, root, cache.get, 1, canonical)
+			c := &client{base: url, http: http.DefaultClient}
+			names := []string{"cached.metric"}
+			before, err := c.fetch(context.Background(), names, from-1, from+60)
+			v, ok := before[names[0]].at(from)
+			if err != nil || !ok || !math.IsNaN(v) {
+				t.Fatalf("expected hole before write: %v %v %v", v, ok, err)
+			}
+			cache.add(names[0], from, 42.25)
+			cached, err := c.fetch(context.Background(), names, from-1, from+60)
+			v, ok = cached[names[0]].at(from)
+			if err != nil || !ok || !math.IsNaN(v) {
+				t.Fatalf("fixture did not cache pre-write response: %v %v %v", v, ok, err)
+			}
+			fresh, err := c.fetchFresh(context.Background(), names, from-1, from+60)
+			v, ok = fresh[names[0]].at(from)
+			if err != nil || !ok || v != 42.25 {
+				t.Fatalf("confirmation reused stale response: %v %v %v", v, ok, err)
+			}
+		})
 	}
 }
 
@@ -130,7 +167,7 @@ func TestEndToEndRealCarbonserver(t *testing.T) {
 			from: strconv.FormatInt(from, 10), until: strconv.FormatInt(until, 10),
 			lookback: 30 * time.Minute, batch: 2, workers: 2, replicaRPS: 100,
 			timeout: 10 * time.Second, retries: 2, backoff: 10 * time.Millisecond, maxBack: 100 * time.Millisecond,
-			flushPt: 1000, writeRetries: 3, checkpoint: filepath.Join(t.TempDir(), "ckpt.json"),
+			flushPt: 1000, writeRetries: 3, confirmRetries: 5, confirmDelay: 10 * time.Millisecond, checkpoint: filepath.Join(t.TempDir(), "ckpt.json"),
 		}
 	}
 	r, err := run(context.Background(), opts(), time.Unix(now, 0))
@@ -142,8 +179,9 @@ func TestEndToEndRealCarbonserver(t *testing.T) {
 		want = append(want, line("e2e.gappy", val(ts), ts))
 	}
 	// Write order across batches and flushes is not part of the contract:
-	// the store merges points by timestamp.
-	got := in.wait(t, len(want))
+	// the store merges points by timestamp. Delayed confirmation reads can
+	// also cause safe duplicate sends.
+	got := compactStrings(in.wait(t, len(want)))
 	slices.Sort(got)
 	slices.Sort(want)
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {

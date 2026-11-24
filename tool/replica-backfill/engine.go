@@ -17,20 +17,28 @@ import (
 )
 
 type engineConfig struct {
-	from, until int64 // gap window, unix seconds, inclusive
-	lookback    int64 // seconds before from that prove a metric active; 0 disables the check
-	batch       int
-	workers     int
-	dryRun      bool
-	printGaps   int
-	checkpoint  string
-	progress    time.Duration
+	from, until    int64 // gap window, unix seconds, inclusive
+	lookback       int64 // seconds before from that prove a metric active; 0 disables the check
+	batch          int
+	workers        int
+	dryRun         bool
+	printGaps      int
+	checkpoint     string
+	progress       time.Duration
+	confirmRetries int
+	confirmDelay   time.Duration
+	confirmTimeout time.Duration
+	maxBackoff     time.Duration
 }
 
 type engineStats struct {
 	names, resumed, scanned, invalid, inactive, complete, withGaps atomic.Int64
 	missingSlots, fillable, unfilledMetrics, stepMismatch          atomic.Int64
 	fallbackMetrics, batches, failedBatches                        atomic.Int64
+	submitted, confirmed                                           atomic.Int64
+	unconfirmedObservations                                        atomic.Int64
+	resentBatches, resentPoints                                    atomic.Int64
+	confirmationFailures                                           atomic.Int64
 }
 
 type engine struct {
@@ -55,6 +63,9 @@ type gap struct {
 }
 
 func (e *engine) run(ctx context.Context, names []string) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	fatal := make(chan error, 1)
 	sort.Strings(names)
 	names = compactStrings(names)
 	e.stats.names.Store(int64(len(names)))
@@ -109,6 +120,13 @@ func (e *engine) run(ctx context.Context, names []string) error {
 				e.stats.batches.Add(1)
 				if err != nil {
 					e.stats.failedBatches.Add(1)
+					if errors.Is(err, errUnconfirmed) {
+						select {
+						case fatal <- err:
+						default:
+						}
+						cancel()
+					}
 					if ctx.Err() == nil {
 						log.Printf("batch %d (%s .. %s) failed: %v", b.seq, b.names[0], b.names[len(b.names)-1], err)
 					}
@@ -136,6 +154,11 @@ feed:
 		if err := e.ckpt.save(); err != nil {
 			return err
 		}
+	}
+	select {
+	case err := <-fatal:
+		return err
+	default:
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -315,7 +338,7 @@ func (e *engine) process(ctx context.Context, b batch) error {
 	if e.out == nil || len(pts) == 0 {
 		return nil
 	}
-	return e.out.write(ctx, pts)
+	return e.writeConfirmed(ctx, pts)
 }
 
 func (e *engine) printGap(name string, g gap, fill int) {
@@ -351,7 +374,7 @@ func (e *engine) reportProgress() func() {
 					s.scanned.Load()+s.resumed.Load(), s.names.Load(), s.withGaps.Load(), s.fillable.Load(),
 					s.unfilledMetrics.Load(), s.failedBatches.Load(), e.replicaRequests())
 				if e.out != nil {
-					msg += fmt.Sprintf(" sent=%d paused=%s", e.out.stats.points.Load(), time.Duration(e.out.stats.pausedNanos.Load()).Round(time.Second))
+					msg += fmt.Sprintf(" sent=%d paused=%s", e.stats.confirmed.Load(), time.Duration(e.out.stats.pausedNanos.Load()).Round(time.Second))
 				}
 				log.Print(msg)
 			}
@@ -392,7 +415,7 @@ type checkpointTracker struct {
 }
 
 func loadCheckpoint(path string, from, until int64) (*checkpointTracker, error) {
-	t := &checkpointTracker{path: path, state: checkpointState{Version: 1, From: from, Until: until}, every: 5 * time.Second}
+	t := &checkpointTracker{path: path, state: checkpointState{Version: 2, From: from, Until: until}, every: 5 * time.Second}
 	b, err := os.ReadFile(path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
@@ -404,7 +427,10 @@ func loadCheckpoint(path string, from, until int64) (*checkpointTracker, error) 
 	if err := json.Unmarshal(b, &s); err != nil {
 		return nil, fmt.Errorf("checkpoint %s: %w", path, err)
 	}
-	if s.Version != 1 || s.From != from || s.Until != until {
+	if s.Version != 2 {
+		return nil, fmt.Errorf("checkpoint %s predates receiver confirmation; use a new checkpoint and rescan the full window", path)
+	}
+	if s.From != from || s.Until != until {
 		return nil, fmt.Errorf("checkpoint %s is for window %d..%d, not %d..%d; remove it or pick another --checkpoint", path, s.From, s.Until, from, until)
 	}
 	t.state = s
