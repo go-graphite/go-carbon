@@ -21,7 +21,7 @@ type rollupScratch struct {
 	seen         []uint64
 	pendingNames namefp.Table
 	stages       []rollupStage
-	stageMetrics []*rollupMetric
+	stageMetrics []*PolicyIdentity
 	samples      []sealrollup.Sample
 	batches      []sealrollup.Batch
 	files        map[string][][]plannedKV

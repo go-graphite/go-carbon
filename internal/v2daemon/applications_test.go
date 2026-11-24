@@ -1,6 +1,7 @@
 package v2daemon
 
 import (
+	"bytes"
 	"math"
 	"path/filepath"
 	"testing"
@@ -45,16 +46,16 @@ func testOriginalApplicationsJournalCore(t *testing.T, useRegistered bool) {
 	}
 	p := s.Producers[0]
 	if useRegistered {
-		registered, err := p.RegisterApplication("test.a", a)
+		registered, local, err := p.RegisterApplication("test.a", a)
 		if err != nil {
 			t.Fatal(err)
 		}
-		again, err := p.RegisterApplication("test.a", append([]byte(nil), a...))
-		if err != nil || registered != again {
+		again, againID, err := p.RegisterApplication("test.a", append([]byte(nil), a...))
+		if err != nil || registered != again || local != againID {
 			t.Fatal("registration lost identity", err)
 		}
 		for _, i := range []int{0, 2} {
-			apps[i].Registered = registered
+			apps[i].Registered, apps[i].LocalID = registered, local
 			apps[i].Name = ""
 			apps[i].Policy = nil
 		}
@@ -154,7 +155,7 @@ func TestClassicFixtureShapes(t *testing.T) {
 }
 
 func TestRegisteredApplicationScope(t *testing.T) {
-	for _, mode := range []string{"producer", "zero", "name", "policy", "restart"} {
+	for _, mode := range []string{"producer", "zero", "name", "policy", "restart", "local-zero", "local-other", "detached"} {
 		t.Run(mode, func(t *testing.T) {
 			root := t.TempDir()
 			cfg := Config{Layer: 3, Producers: 2, Shards: 1, MaxCoreRows: 16, GroupInterval: time.Hour}
@@ -168,21 +169,24 @@ func TestRegisteredApplicationScope(t *testing.T) {
 				t.Fatal(err)
 			}
 			p := s.Producers[0]
-			registered, err := p.RegisterApplication("scope", policy)
+			registered, local, err := p.RegisterApplication("scope", policy)
 			if err != nil {
 				t.Fatal(err)
 			}
 			bad := append([]byte(nil), policy...)
 			bad[len(bad)-1] ^= 1
-			if _, err := p.RegisterApplication("scope", bad); err == nil {
+			if _, _, err := p.RegisterApplication("scope", bad); err == nil {
 				t.Fatal("accepted changed catalog definition")
 			}
-			app := Application{Registered: registered, Order: 1, Clock: 1000, Points: []points.Point{{Timestamp: 999, Value: 1}}, Sequence: []uint64{1}}
+			app := Application{Registered: registered, LocalID: local, Order: 1, Clock: 1000, Points: []points.Point{{Timestamp: 999, Value: 1}}, Sequence: []uint64{1}}
 			switch mode {
 			case "producer":
 				p = s.Producers[1]
+				if _, _, err := p.RegisterApplication("scope", policy); err != nil {
+					t.Fatal(err)
+				}
 			case "zero":
-				app.Registered = &RegisteredApplication{}
+				app.Registered = &v2core.ApplicationPolicy{}
 			case "name":
 				app.Name = "scope"
 			case "policy":
@@ -197,6 +201,22 @@ func TestRegisteredApplicationScope(t *testing.T) {
 				}
 				defer func() { _ = reopened.Close() }()
 				p = reopened.Producers[0]
+				if _, _, err := p.RegisterApplication("scope", policy); err != nil {
+					t.Fatal(err)
+				}
+			case "local-zero":
+				app.LocalID = 0
+			case "local-other":
+				other := bytes.ReplaceAll(policy, []byte("scope"), []byte("other"))
+				_, app.LocalID, err = p.RegisterApplication("other", other)
+				if err != nil {
+					t.Fatal(err)
+				}
+			case "detached":
+				app.Registered, err = v2core.NewApplicationPolicy("scope", policy)
+				if err != nil {
+					t.Fatal(err)
+				}
 			}
 			if err := p.AppendApplications([]Application{app}); err == nil {
 				t.Fatal("accepted invalid registered application")

@@ -35,9 +35,9 @@ func TestRollupRenumberMovesSlotColumns(t *testing.T) {
 			case op < 6: // adoption replaces the metric under an ID
 				id := uint64(rng.IntN(next) + 1)
 				if old := r.installed(id); old != nil {
-					c := *old
+					c := rankTestReplacement(old)
 					md := meta()
-					r.install(id, &c, md)
+					r.install(id, c, md)
 					model[id] = md
 				}
 			case op < 7: // a seal commits new scalars for the same metric

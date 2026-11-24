@@ -102,7 +102,7 @@ func (r *rollupOutput) fileID(group string, partition int64) string {
 // superseded versions of those slots (sealrollup.SealPlan): each slot's
 // versions go just before its winner, in the winner's partition, and count
 // toward no coverage, since only Mat and Raw winners are visible to readers.
-func (r *rollupOutput) appendStage(s *rollupStage, m *rollupMetric, batches []sealrollup.Batch, records, versions []sealrollup.Record, part partsformat.PartID, stage func(string)) error {
+func (r *rollupOutput) appendStage(s *rollupStage, m *PolicyIdentity, batches []sealrollup.Batch, records, versions []sealrollup.Record, part partsformat.PartID, stage func(string)) error {
 	if r.files == nil {
 		r.files = map[string]*[]plannedKV{}
 		r.definitions = map[[32]byte][]partsformat.ArchivePolicy{}
@@ -375,7 +375,7 @@ func (r *coreRollups) planStages(part partsformat.PartID) (coreSealPlan, error) 
 	return out, nil
 }
 
-func compareRollupMetrics(x, y *rollupMetric) int {
+func compareRollupMetrics(x, y *PolicyIdentity) int {
 	// Most comparisons share one interned definition, including its group.
 	if x.policy.policyDefinition != y.policy.policyDefinition {
 		if len(x.policy.Group) != len(y.policy.Group) {

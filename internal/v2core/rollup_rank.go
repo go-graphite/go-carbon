@@ -20,7 +20,7 @@ import (
 // With the store dictionary (ID-keyed parts) the key is (vshard, ID), the
 // GCI2 key order, so no rank is consulted: dictKeys sets it once the seal's
 // new names are appended.
-func (r *coreRollups) stageKey(s *rollupStage, m *rollupMetric, dict *v2dict.Dict) {
+func (r *coreRollups) stageKey(s *rollupStage, m *PolicyIdentity, dict *v2dict.Dict) {
 	s.vshard = m.vshard
 	if dict != nil {
 		return
@@ -40,7 +40,7 @@ func (r *coreRollups) stageKey(s *rollupStage, m *rollupMetric, dict *v2dict.Dic
 // name; the seal syncs the dictionary before it writes a part.
 func (r *coreRollups) dictKeys(dict *v2dict.Dict) error {
 	var scratch [dictChunk]v2dict.NewName
-	var metrics [dictChunk]*rollupMetric
+	var metrics [dictChunk]*PolicyIdentity
 	n := 0
 	appendNames := func() error {
 		err := dict.AppendBatch(scratch[:n])
@@ -105,8 +105,8 @@ func (r *coreRollups) hintRank(h *PolicyIdentity, id uint64) uint32 {
 
 // metricRank returns m's rank when this planner ranks m itself (not an older
 // metric installed under the same ID) and m's hint is its own; 0 otherwise.
-func (r *coreRollups) metricRank(m *rollupMetric) uint32 {
-	if rk := r.hintRank(m.PolicyIdentity, m.id); rk != 0 && r.dense[rk-1] == m {
+func (r *coreRollups) metricRank(m *PolicyIdentity) uint32 {
+	if rk := r.hintRank(m, m.id); rk != 0 && r.dense[rk-1] == m {
 		return rk
 	}
 	return 0
@@ -117,7 +117,7 @@ func (r *coreRollups) metricRank(m *rollupMetric) uint32 {
 const deadSlot = math.MaxUint64
 
 // installed resolves this owner's numeric ID through its slot map.
-func (r *coreRollups) installed(id uint64) *rollupMetric {
+func (r *coreRollups) installed(id uint64) *PolicyIdentity {
 	s, ok := r.metrics[id]
 	if !ok {
 		return nil
@@ -127,8 +127,8 @@ func (r *coreRollups) installed(id uint64) *rollupMetric {
 
 // slotOf uses the owner's numeric map, so move adoption can share metrics
 // and overwrite identity hints without a name comparison or an unranked scan.
-func (r *coreRollups) slotOf(id uint64, m *rollupMetric) uint32 {
-	if s, ok := r.hintSlot(m.PolicyIdentity, id); ok && r.slotMetric(s) == m {
+func (r *coreRollups) slotOf(id uint64, m *PolicyIdentity) uint32 {
+	if s, ok := r.hintSlot(m, id); ok && r.slotMetric(s) == m {
 		return s
 	}
 	s, ok := r.metrics[id]
@@ -143,7 +143,7 @@ func (r *coreRollups) slotOf(id uint64, m *rollupMetric) uint32 {
 // len(dense)+k. It sorts the columns together; from keeps each entry's old
 // slot, so renumber can move the expiry calendar.
 type rollupTail struct {
-	metrics []*rollupMetric
+	metrics []*PolicyIdentity
 	ids     []uint64
 	meta    []metricMetadata
 	ttl     []int64
@@ -268,7 +268,7 @@ type rollupRankRef struct {
 // only as many passes as the largest key needs), then sorts each run of equal
 // odd keys (unranked neighbours) by name. It returns the sorted slice and the
 // spare buffer for reuse. metrics[ref.stage] names each ref's metric.
-func sortRollupRanks(refs, scratch []rollupRankRef, counts *[]int, metrics []*rollupMetric) ([]rollupRankRef, []rollupRankRef) {
+func sortRollupRanks(refs, scratch []rollupRankRef, counts *[]int, metrics []*PolicyIdentity) ([]rollupRankRef, []rollupRankRef) {
 	byName := func(a, b rollupRankRef) int { return compareRollupMetrics(metrics[a.stage], metrics[b.stage]) }
 	if len(refs) < 256 {
 		slices.SortFunc(refs, func(a, b rollupRankRef) int {

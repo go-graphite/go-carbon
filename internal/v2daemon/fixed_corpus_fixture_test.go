@@ -92,7 +92,8 @@ func runFixed(root string, layer int, f Fixture, out io.Writer, written func() (
 	// Name allocation and identical reusable generator buffers are outside timing.
 	names := make([]string, f.Names)
 	policies := make([][]byte, f.Names)
-	registered := make([]*RegisteredApplication, f.Names)
+	registered := make([]*v2core.ApplicationPolicy, f.Names)
+	registeredIDs := make([]uint64, f.Names)
 	for i := range names {
 		names[i] = fixtureName(i)
 		if layer == 3 {
@@ -159,12 +160,12 @@ func runFixed(root string, layer int, f Fixture, out io.Writer, written func() (
 						metric := int(row.ID - 1)
 						if registered[metric] == nil {
 							var err error
-							registered[metric], err = producer.RegisterApplication(in.names[i], policies[metric])
+							registered[metric], registeredIDs[metric], err = producer.RegisterApplication(in.names[i], policies[metric])
 							if err != nil {
 								return err
 							}
 						}
-						in.apps = append(in.apps, Application{Registered: registered[metric], Order: in.order, Clock: 1794700800 + int64((seal+1)*4), Points: in.data[i : i+1 : i+1], Sequence: in.seq[i : i+1 : i+1]})
+						in.apps = append(in.apps, Application{Registered: registered[metric], LocalID: registeredIDs[metric], Order: in.order, Clock: 1794700800 + int64((seal+1)*4), Points: in.data[i : i+1 : i+1], Sequence: in.seq[i : i+1 : i+1]})
 					}
 					x = producer.AppendApplications(in.apps)
 					clear(in.apps)

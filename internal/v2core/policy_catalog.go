@@ -433,7 +433,7 @@ func (m *readMetricState) metadataForName(name string) (RollupPolicy, RollupMeta
 }
 
 // metadataOf returns the committed metadata of m, installed under id.
-func (r *coreRollups) metadataOf(id uint64, m *rollupMetric) RollupMetadata {
+func (r *coreRollups) metadataOf(id uint64, m *PolicyIdentity) RollupMetadata {
 	return m.metadata(r.meta[r.slotOf(id, m)])
 }
 

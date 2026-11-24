@@ -47,7 +47,7 @@ func (r *coreRollups) planPartsLegacy(in coreSealInput) (coreSealPlan, error) {
 			fresh := m == nil
 			if fresh {
 				if h := b.Registered; h != nil && h.catalog == r.identities && h.id == b.ID {
-					m = newRollupMetric(h)
+					m = h
 				} else {
 					policy := b.Policy
 					if h != nil {
@@ -82,7 +82,7 @@ func (r *coreRollups) planPartsLegacy(in coreSealInput) (coreSealPlan, error) {
 		}
 		batchPositions[bi] = i
 		m := metrics[i]
-		if (b.Registered == nil || b.Registered != m.PolicyIdentity) && !m.definitionEqual(b.Policy) {
+		if (b.Registered == nil || b.Registered != m) && !m.definitionEqual(b.Policy) {
 			return coreSealPlan{}, errors.New("stored rollup policy changed")
 		}
 		batchCounts[i]++
@@ -136,7 +136,7 @@ func (r *coreRollups) planPartsLegacy(in coreSealInput) (coreSealPlan, error) {
 	// advance order, so the persisted reset frontier is already known here.
 	for i := range stages {
 		s, m := &stages[i], metrics[i]
-		if r.expire != nil && s.batches == 0 && r.expire(m.rollupPolicy(), m.PolicyIdentity.metadata(s.next), now) {
+		if r.expire != nil && s.batches == 0 && r.expire(m.rollupPolicy(), m.metadata(s.next), now) {
 			// Older readers must reject reset authority rather than ignore its
 			// fields and resurrect the covered slot history.
 			s.next.Version = max(2, s.next.Version)

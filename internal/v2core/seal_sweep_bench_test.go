@@ -78,7 +78,7 @@ func BenchmarkSealSweep(b *testing.B) {
 					}
 					for i, id := range ids {
 						arena[i] = row{ID: uint64(id) + 1, Time: times[i], Bits: uint64(i) * 0x9e3779b97f4a7c15, Seq: uint64(i + 1)}
-						in[i] = Batch{ID: uint64(id) + 1, Order: uint64(i + 1), Clock: clocks[i/512], Registered: r.installed(uint64(id) + 1).PolicyIdentity, Points: arena[i : i+1]}
+						in[i] = Batch{ID: uint64(id) + 1, Order: uint64(i + 1), Clock: clocks[i/512], Registered: r.installed(uint64(id) + 1), Points: arena[i : i+1]}
 						handles[id+1] = in[i].Registered
 					}
 					// The seal's real input: the owner's frozen pending head,

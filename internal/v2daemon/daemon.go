@@ -69,8 +69,8 @@ type Producer struct {
 	index, count, layer, maxPending int
 	catalog                         *partlog.NameCatalog
 	packets                         []packet
-	outboxes                        []*v2core.Outbox         // free; one in steady intake
-	applications                    []*RegisteredApplication // by catalog ID
+	outboxes                        []*v2core.Outbox            // free; one in steady intake
+	applications                    []*v2core.ApplicationPolicy // by catalog ID
 	cursor                          uint64
 	applyOrder                      uint64
 	journalDir                      string

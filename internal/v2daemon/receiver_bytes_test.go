@@ -42,7 +42,7 @@ func TestApplicationOwnerByteNames(t *testing.T) {
 			if quota {
 				o.throttle = func(p *points.Points, _ bool) bool {
 					seen = append(seen, p.Metric)
-					if local, ok := o.names.Get(namefp.Name(p.Metric)); checkCanonical && ok && unsafe.StringData(p.Metric) != unsafe.StringData(o.p.applications[local].name()) {
+					if local, ok := o.names.Get(namefp.Name(p.Metric)); checkCanonical && ok && unsafe.StringData(p.Metric) != unsafe.StringData(o.p.applications[local].Name()) {
 						t.Error("quota received a new string for an already registered name")
 					}
 					return p.Metric == "quota.blocked"

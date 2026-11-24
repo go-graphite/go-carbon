@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"testing"
 	"time"
-	"unsafe"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 )
@@ -13,9 +12,6 @@ import (
 // name is published, poison its resolver: any rank comparison or reconstruction
 // during the next ID-keyed plan panics. Real dictionary IDs still key the parts.
 func TestIDKeyedSealNoNameRanks(t *testing.T) {
-	if n := unsafe.Sizeof(rollupMetric{}); n != 16 {
-		t.Fatalf("metric grew to %d bytes", n)
-	}
 	r := newCoreRollups()
 	r.identities.dict.Store(openTestDict(t))
 	const wave = 600
