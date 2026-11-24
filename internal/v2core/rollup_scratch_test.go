@@ -1,12 +1,18 @@
 package v2core
 
 import (
+	"bytes"
 	"fmt"
 	"math/rand"
+	"reflect"
 	"runtime"
+	"slices"
+	"strings"
 	"testing"
+	"time"
 	"unsafe"
 
+	"github.com/cockroachdb/pebble"
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2part"
 )
@@ -178,7 +184,12 @@ func BenchmarkSealPlanRetained(b *testing.B) {
 // retainedScratchBytes is the planner working-set capacity this planner keeps
 // between seals; with pooling it is zero once a seal has committed or aborted.
 func (r *coreRollups) retainedScratchBytes() int {
-	n := cap(r.stages)*int(unsafe.Sizeof(rollupStage{})) + cap(r.stageMetrics)*int(unsafe.Sizeof((*rollupMetric)(nil))) + cap(r.samples)*int(unsafe.Sizeof(sealrollup.Sample{})) + cap(r.batches)*int(unsafe.Sizeof(sealrollup.Batch{})) + cap(r.arena)
+	n := (cap(r.sweepKeys) + cap(r.sweepSpare) + cap(r.seen)) * 8
+	// A nonzero table retains storage; its private backing capacity is not exposed.
+	if !reflect.ValueOf(r.pendingNames).IsZero() {
+		n += int(unsafe.Sizeof(r.pendingNames))
+	}
+	n += cap(r.stages)*int(unsafe.Sizeof(rollupStage{})) + cap(r.stageMetrics)*int(unsafe.Sizeof((*rollupMetric)(nil))) + cap(r.samples)*int(unsafe.Sizeof(sealrollup.Sample{})) + cap(r.batches)*int(unsafe.Sizeof(sealrollup.Batch{})) + cap(r.arena)
 	for i := range r.lanes {
 		lane := &r.lanes[i]
 		n += (cap(lane.ranked)+cap(lane.spare))*int(unsafe.Sizeof(rollupRankRef{})) + cap(lane.counts)*8 + cap(lane.records)*int(unsafe.Sizeof(sealrollup.Record{})) + cap(lane.output.arena)
@@ -187,4 +198,163 @@ func (r *coreRollups) retainedScratchBytes() int {
 		}
 	}
 	return n
+}
+
+// Two owners may hold plans simultaneously. A third seal reuses only a
+// resolved plan's working set; neither Commit nor Abort may leave aliases.
+func TestSealScratchOutstandingPlans(t *testing.T) {
+	for _, commitFirst := range []bool{false, true} {
+		t.Run(fmt.Sprint(commitFirst), func(t *testing.T) {
+			drainRollupScratchPool()
+			defer drainRollupScratchPool()
+			_, input := sealTimeOnlyFixture(t, 300, 2, 42)
+			for i := range input {
+				input[i].Policy = input[i].Registered.definitionBytes()
+				input[i].Registered = nil
+			}
+			first, second := newCoreRollups(), newCoreRollups()
+			first.parallelism, second.parallelism = 1, 1
+			a, err := first.planParts(coreSealInput{Batches: input})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if first.pending {
+					a.Abort()
+				}
+			}()
+			snapshot := func(p coreSealPlan) string {
+				var buf bytes.Buffer
+				for _, part := range p.Parts {
+					for _, segment := range part.Segments {
+						for _, kv := range segment {
+							fmt.Fprintf(&buf, "%s:%x;", kv.name, kv.value)
+							if kv.record != nil {
+								fmt.Fprintf(&buf, "%+v;", *kv.record)
+							}
+						}
+					}
+				}
+				return buf.String()
+			}
+			want := snapshot(a)
+			keys, spare, seen := slices.Clone(first.sweepKeys), slices.Clone(first.sweepSpare), slices.Clone(first.seen)
+			held := first.scratch
+			check := func() {
+				t.Helper()
+				if first.scratch != held || held == nil || !first.pending {
+					t.Fatal("outstanding plan lost scratch ownership")
+				}
+				if got := snapshot(a); got != want {
+					t.Fatal("outstanding plan records or names changed during reuse")
+				}
+				if !slices.Equal(first.sweepKeys, keys) || !slices.Equal(first.sweepSpare, spare) || !slices.Equal(first.seen, seen) {
+					t.Fatal("outstanding plan keys changed")
+				}
+				for i, m := range first.stageMetrics {
+					if n, ok := first.pendingNames.Get(m.fingerprint()); !ok || n != uint32(i) {
+						t.Fatal("outstanding plan lost fresh-name checks")
+					}
+				}
+			}
+			check()
+			for round := range 3 {
+				secondInput := slices.Clone(input)
+				for i := range secondInput {
+					secondInput[i].Order += uint64(round) * 1000
+				}
+				b, err := second.planParts(coreSealInput{Batches: secondInput})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if first.scratch == second.scratch {
+					t.Fatal("outstanding plans share scratch")
+				}
+				check()
+				if round == 0 {
+					b.Abort()
+				} else {
+					b.Commit()
+				}
+				if second.retainedScratchBytes() != 0 {
+					t.Fatal("resolved owner retains scratch")
+				}
+				check()
+			}
+			if commitFirst {
+				a.Commit()
+			} else {
+				a.Abort()
+			}
+			if first.retainedScratchBytes() != 0 {
+				t.Fatal("first owner retains released scratch")
+			}
+			// Reuse a returned table with exactly the same fresh names. Old entries
+			// must be cleared, while two IDs in a new plan must still be rejected.
+			third := newCoreRollups()
+			c, err := third.planParts(coreSealInput{Batches: input})
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.Abort()
+			duplicate := append([]Batch(nil), input[:1]...)
+			dup := input[0]
+			dup.ID, dup.Order = 1<<40, dup.Order+1
+			duplicate = append(duplicate, dup)
+			if p, err := third.planParts(coreSealInput{Batches: duplicate}); err == nil {
+				p.Abort()
+				t.Fatal("accepted two fresh IDs for one name")
+			} else if !strings.Contains(err.Error(), "multiple pending IDs") {
+				t.Fatal(err)
+			}
+			if third.retainedScratchBytes() != 0 {
+				t.Fatal("failed plan retains scratch")
+			}
+		})
+	}
+}
+
+func TestSealScratchExpirySeen(t *testing.T) {
+	for _, expiry := range []bool{false, true} {
+		for _, offset := range []uint64{0, 1 << 20, 1 << 40} {
+			t.Run(fmt.Sprintf("expiry=%v/offset=%d", expiry, offset), func(t *testing.T) {
+				drainRollupScratchPool()
+				defer drainRollupScratchPool()
+				_, input := sealTimeOnlyFixture(t, 16, 1, 11)
+				for i := range input {
+					input[i].Policy = input[i].Registered.definitionBytes()
+					input[i].Registered = nil
+				}
+				r := newCoreRollups() // name-keyed compatibility path, with a durable DB
+				r.parallelism = 1
+				db, err := pebble.Open(t.TempDir(), &pebble.Options{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer db.Close()
+				r.db = db
+				if expiry {
+					r.expire = func(RollupPolicy, RollupMetadata, time.Time) bool { return false }
+					r.setExpiryTTL(func(RollupPolicy, time.Time) (time.Duration, time.Time) { return time.Hour, time.Time{} })
+				}
+				for i := range input {
+					input[i].ID += offset
+				}
+				p, err := r.planParts(coreSealInput{Batches: input})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if expiry && offset == 0 && len(r.seen) == 0 {
+					t.Fatal("dense expiry plan lacks idle-ID bitset")
+				}
+				if !expiry && cap(r.seen) != 0 {
+					t.Fatal("expiry-off plan allocated idle-ID bitset")
+				}
+				p.Commit()
+				if r.retainedScratchBytes() != 0 {
+					t.Fatal("expiry plan retains scratch after commit")
+				}
+			})
+		}
+	}
 }

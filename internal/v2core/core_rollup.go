@@ -115,8 +115,8 @@ type coreRollups struct {
 	stageMetrics []*rollupMetric
 	pendingNames namefp.Table
 	// sweepKeys/sweepSpare are the seal's sorted batch keys and radix spare,
-	// seen the idle pass's bitset of staged IDs: pointer-free, so retaining
-	// them between seals adds nothing for the GC to scan.
+	// seen the expiry pass's bitset of staged IDs. The seal borrows these
+	// and pendingNames with the rest of its scratch until Commit/Abort.
 	sweepKeys  []uint64
 	sweepSpare []uint64
 	seen       []uint64
@@ -542,8 +542,8 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 	}
 	// One stable sort of the frozen view's applications by ID makes each
 	// name's applications one run in arrival order; the sweep stages a name
-	// once per run and reads its points in place. The keys and the idle
-	// bitset are pointer-free scratch retained between seals.
+	// once per run and reads its points in place. The keys and the expiry
+	// bitset belong to this seal's borrowed scratch.
 	keys, spare, maxID, wide, sampleCount := view.sealKeys(r.sweepKeys, r.sweepSpare)
 	r.sweepKeys, r.sweepSpare = keys, spare
 	keyID := func(k uint64) uint64 {
@@ -560,9 +560,8 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 	}
 	stages, metrics = slices.Grow(stages, runs), slices.Grow(metrics, runs)
 	r.stages, r.stageMetrics = stages, metrics
-	idle := r.expire != nil || r.db != nil
 	seen := r.seen[:0]
-	if words := sealSeenWords(maxID, len(keys)); idle && words != 0 {
+	if words := sealSeenWords(maxID, len(keys)); r.expire != nil && words != 0 {
 		seen = slices.Grow(seen, words)[:words]
 	}
 	r.seen = seen
