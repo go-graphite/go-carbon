@@ -47,7 +47,7 @@ func checkRankArray(t *testing.T, r *coreRollups, seal int) {
 		}
 		owner[id] = s
 	}
-	for id := range r.metrics {
+	for _, id := range rollupTestIDs(r) {
 		m := r.installed(id)
 		s, ok := owner[id]
 		if h, hinted := r.hintSlot(m, id); !ok || hinted && h != uint32(s) {
@@ -77,7 +77,7 @@ func unrankAll(r *coreRollups) {
 		}
 		moved[s] = uint32(len(ids))
 		m := r.slotMetric(uint32(s))
-		r.metrics[id] = uint32(len(ms))
+		r.names.Put(m.fingerprint(), uint32(len(ms)))
 		ms = append(ms, m)
 		ids, meta = append(ids, id), append(meta, r.meta[s])
 		if r.ttl != nil {
@@ -182,14 +182,14 @@ func rankBoundaryRun(t *testing.T, workers int, adopt bool) {
 						mod = 97
 					}
 					for _, p := range []*coreRollups{ranked, ref} {
-						for id := range p.metrics {
+						for _, id := range rollupTestIDs(p) {
 							m := p.installed(id)
 							if id%mod == 1 {
 								replacement, err := (&PolicyCatalog{}).intern(id, m.Name(), m.Definition())
 								if err != nil {
 									t.Fatal(err)
 								}
-								p.install(id, replacement, freshMetadata)
+								rollupTestInstall(p, id, replacement, freshMetadata)
 							}
 						}
 					}
@@ -221,8 +221,8 @@ func rankBoundaryRun(t *testing.T, workers int, adopt bool) {
 					// seal (its renumber re-stores the hints) and is dropped.
 					next := newPlanner()
 					next.identities = ranked.identities
-					adopted := make([]uint64, 0, len(ranked.metrics))
-					for id := range ranked.metrics {
+					adopted := make([]uint64, 0, len(rollupTestIDs(ranked)))
+					for _, id := range rollupTestIDs(ranked) {
 						// Rank-ordered slots coincide when both planners
 						// hold the same names; a two-thirds subset shifts
 						// the adopter's slots, so it overwrites hints.
@@ -234,7 +234,7 @@ func rankBoundaryRun(t *testing.T, workers int, adopt bool) {
 					rng.Shuffle(len(adopted), func(i, j int) { adopted[i], adopted[j] = adopted[j], adopted[i] })
 					for _, id := range adopted {
 						m := ranked.installed(id)
-						next.install(id, m, ranked.metaOf(id))
+						rollupTestInstall(next, id, m, ranked.metaOf(id))
 					}
 					plan, err := next.plan(coreSealInput{Batches: batches})
 					if err != nil {
@@ -330,14 +330,14 @@ func TestRollupSlotArraysScaleWithNames(t *testing.T) {
 		m := rankTestMetric(i)
 		m.id = uint64(i)*producers + 37
 		maxID = max(maxID, m.id)
-		r.install(m.id, m, metricMetadata{})
+		rollupTestInstall(r, m.id, m, metricMetadata{})
 	}
 	r.renumber()
-	for id := range r.metrics {
+	for _, id := range rollupTestIDs(r) {
 		m := r.installed(id)
 		if id%5 == 0 {
 			c := rankTestReplacement(m)
-			r.install(id, c, r.metaOf(id))
+			rollupTestInstall(r, id, c, r.metaOf(id))
 		}
 	}
 	r.renumber()

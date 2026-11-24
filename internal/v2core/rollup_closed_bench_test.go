@@ -23,7 +23,7 @@ func BenchmarkClosedWindowSealCPU(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		r.install(m.id, m, freshMetadata)
+		rollupTestInstall(r, m.id, m, freshMetadata)
 		input[i] = Batch{ID: m.id, Registered: m, Points: make([]Row, 1)}
 	}
 	b.ReportAllocs()

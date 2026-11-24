@@ -28,7 +28,7 @@ type PolicyIdentity struct {
 	// ownerSlot is a seal planner's hint: 1 + the owner-local slot install
 	// gave this name, 0 when none. It sits in padding (0 B per name). Planners
 	// sharing the identity (adoption) overwrite it, so it is only a hint:
-	// readers confirm ids[slot] == id and fall back to the metrics map.
+	// readers confirm ids[slot] == id and fall back to the owner's fingerprint table.
 	ownerSlot atomic.Uint32
 	// route is namefp.Route(name)>>32, the second fingerprint half. It takes
 	// the struct from 56 B to 64 B, and both round up to Go's 64 B size class,

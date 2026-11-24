@@ -30,11 +30,11 @@ func TestExpiryColumnsActivation(t *testing.T) {
 				// Reverse arrival order forces rollupTail.Swap on every renumber.
 				for i := 19; i >= 0; i-- {
 					m := rankTestMetric(phase*20 + i)
-					r.install(m.id, m, metricMetadata{LastUpdate: now.Add(-2*time.Minute + time.Duration(m.id)*time.Second).UnixNano()})
+					rollupTestInstall(r, m.id, m, metricMetadata{LastUpdate: now.Add(-2*time.Minute + time.Duration(m.id)*time.Second).UnixNano()})
 				}
 				if phase > 0 {
 					old := r.dense[0]
-					r.install(old.id, rankTestReplacement(old), r.metaOf(old.id))
+					rollupTestInstall(r, old.id, rankTestReplacement(old), r.metaOf(old.id))
 				}
 				r.renumber()
 				checkRankArray(t, r, phase)

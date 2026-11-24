@@ -26,7 +26,7 @@ func BenchmarkRollupRegisteredPlanning(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		r.install(id, m, freshMetadata)
+		rollupTestInstall(r, id, m, freshMetadata)
 		batches[i] = Batch{ID: id, Registered: m, Order: 1, Clock: 1000, Points: []Row{{Time: 999, Seq: 1}}}
 	}
 	b.ReportAllocs()

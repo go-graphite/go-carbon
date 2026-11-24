@@ -56,7 +56,7 @@ func TestExpiryCalendarMatchesWalk(t *testing.T) {
 	// As carbon's Expire: a gate only, so a name asked before its window
 	// ends would expire early.
 	r.expire = func(RollupPolicy, RollupMetadata, time.Time) bool { return allowed }
-	for id := range r.metrics {
+	for _, id := range rollupTestIDs(r) {
 		m := r.installed(id)
 		slot := r.slotOf(id, m)
 		r.meta[slot].LastUpdate = (t0-int64(id%700))*int64(time.Second) + int64(id)*7919%int64(time.Second)
@@ -76,7 +76,7 @@ func TestExpiryCalendarMatchesWalk(t *testing.T) {
 		}
 		// The walk, as planParts and the maintenance pass ran it.
 		want, walkDue := map[uint32]bool{}, false
-		for id := range r.metrics {
+		for _, id := range rollupTestIDs(r) {
 			m := r.installed(id)
 			slot := r.slotOf(id, m)
 			if meta := r.meta[slot]; !meta.Expired && (walkExpire(m.rollupPolicy(), m.metadata(meta), now)) {
@@ -162,7 +162,7 @@ func BenchmarkExpirySelect(b *testing.B) {
 		b.Run("walk/"+strconv.Itoa(names), func(b *testing.B) {
 			b.ReportAllocs()
 			for range b.N {
-				for id := range r.metrics {
+				for _, id := range rollupTestIDs(r) {
 					m := r.installed(id)
 					if meta := r.meta[r.slotOf(id, m)]; !meta.Expired && (r.expire(m.rollupPolicy(), m.metadata(meta), now)) {
 						b.Fatal("due")

@@ -30,21 +30,21 @@ func TestRollupRenumberMovesSlotColumns(t *testing.T) {
 				m := rankTestMetric(next)
 				next++
 				md := meta()
-				r.install(m.id, m, md)
+				rollupTestInstall(r, m.id, m, md)
 				model[m.id] = md
 			case op < 6: // adoption replaces the metric under an ID
 				id := uint64(rng.IntN(next) + 1)
 				if old := r.installed(id); old != nil {
 					c := rankTestReplacement(old)
 					md := meta()
-					r.install(id, c, md)
+					rollupTestInstall(r, id, c, md)
 					model[id] = md
 				}
 			case op < 7: // a seal commits new scalars for the same metric
 				id := uint64(rng.IntN(next) + 1)
 				if m := r.installed(id); m != nil {
 					md := meta()
-					r.install(id, m, md)
+					rollupTestInstall(r, id, m, md)
 					model[id] = md
 				}
 			case op < 8: // another planner overwrites a hint

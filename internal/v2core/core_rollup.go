@@ -94,14 +94,12 @@ type coreRollups struct {
 
 	rankMu    *sync.Mutex // existing owner publication lock; legacy renumber only
 	stage     func(string)
-	metrics   map[uint64]uint32 // NumericID -> owner slot; no shared pointer or hint
 	taken     []uint64
 	due       []uint32
 	planNow   int64
 	planClock time.Time
-	// names holds each installed name's fingerprint; pendingNames those of
-	// this plan's fresh names. Both are pointer-free sets that read no name
-	// bytes and hold no slot, so renumber moves no entry.
+	// names maps installed fingerprints to owner slots without reading name
+	// bytes. pendingNames holds this plan's fresh fingerprints and stages.
 	names namefp.Table
 	// stages is the seal's pointer-free work list; stageMetrics[i] is the
 	// metric of stages[i], the only pointer per stage.
@@ -158,13 +156,12 @@ const rankSlack = 64
 const rollupMetadataArchive = uint32(math.MaxUint32)
 
 func newCoreRollups() *coreRollups {
-	return &coreRollups{identities: &PolicyCatalog{}, metrics: map[uint64]uint32{}, expiries: calendar{slots: map[int64][]uint32{}}}
+	return &coreRollups{identities: &PolicyCatalog{}, expiries: calendar{slots: map[int64][]uint32{}}}
 }
 
-// install is the only writer of metrics and names. It indexes every installed
-// name and files its inactivity expiry, when enabled. meta becomes id's scalars.
+// install indexes every installed name and files its inactivity expiry, when enabled. meta becomes id's scalars.
 func (r *coreRollups) install(id uint64, m *PolicyIdentity, meta metricMetadata) {
-	old := r.installed(id)
+	old := r.installedIdentity(id, m)
 	s := uint32(len(r.ids))
 	if old != nil {
 		s = r.slotOf(id, old)
@@ -188,10 +185,9 @@ func (r *coreRollups) install(id uint64, m *PolicyIdentity, meta metricMetadata)
 		r.ids, r.meta, r.unranked = append(r.ids, id), append(r.meta, metricMetadata{}), append(r.unranked, m)
 	}
 	r.meta[s] = meta
-	r.metrics[id] = s
 	m.ownerSlot.Store(s + 1)
 	if old != m {
-		r.names.Put(m.fingerprint(), 0) // a set: the slot is m's ownerSlot
+		r.names.Put(m.fingerprint(), s)
 	}
 	if r.expire != nil {
 		r.resolveTTL(s, m, r.clock())
@@ -395,7 +391,7 @@ func (r *coreRollups) needsMetadataSeal(b *coreBatch) bool {
 
 // pendingMetadataDue reports whether a pending name that is not installed yet
 // needs a metadata seal. It visits only positions appended since its last
-// clear pass, and resolves catalog handles only for names not installed.
+// clear pass, resolving identities before probing installed fingerprints.
 func (r *coreRollups) pendingMetadataDue(h *pendingHead, lookup func(uint64) *ApplicationPolicy) bool {
 	due := false
 	h.rawView(lookup).IDs(h.scanned, h.n, func(_ int, id uint64, cold *coreBatch) bool {
@@ -420,7 +416,7 @@ func (r *coreRollups) pendingMetadataDue(h *pendingHead, lookup func(uint64) *Ap
 // noteNewNames extends the head's new-name list over positions appended since
 // its last pass: each row ID that is not installed, once, with its name hash.
 // Installed names have sealed metadata in every snapshot published after their
-// install, which readers resolve by name. Only these IDs touch the catalog.
+// install, which readers resolve by name.
 // The caller excludes a concurrent Commit (the owner loop, or sealPubMu). A
 // nil r (no rollups) has nothing installed.
 func (r *coreRollups) noteNewNames(h *pendingHead, lookup func(uint64) *ApplicationPolicy) {
@@ -589,7 +585,7 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 			firstRegistered, firstPolicy = first.cold.Registered, first.cold.Policy
 		}
 		// A valid identity hint reaches either kind of owner slot directly.
-		// Missing or overwritten hints use the owner's numeric slot map.
+		// Missing or overwritten hints use the installed fingerprint table.
 		var m *PolicyIdentity
 		slot, hinted := r.hintSlot(firstRegistered, id)
 		rk := uint32(0)

@@ -13,8 +13,8 @@ import (
 // rollupStateDigest lists every installed name's identity and committed scalars
 // in ID order.
 func rollupStateDigest(r *coreRollups) string {
-	ids := make([]uint64, 0, len(r.metrics))
-	for id := range r.metrics {
+	ids := make([]uint64, 0, len(rollupTestIDs(r)))
+	for _, id := range rollupTestIDs(r) {
 		ids = append(ids, id)
 	}
 	slices.Sort(ids)
@@ -23,7 +23,7 @@ func rollupStateDigest(r *coreRollups) string {
 		m := r.installed(id)
 		fmt.Fprintf(&b, "%d %s %+v name=%v\n", id, m.definitionBytes(), r.meta[r.slotOf(id, m)], nameIndexed(r, m))
 	}
-	fmt.Fprintf(&b, "names=%d metrics=%d\n", r.names.Len(), len(r.metrics))
+	fmt.Fprintf(&b, "names=%d metrics=%d\n", r.names.Len(), len(rollupTestIDs(r)))
 	return b.String()
 }
 

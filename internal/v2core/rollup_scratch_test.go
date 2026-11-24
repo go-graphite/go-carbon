@@ -37,7 +37,7 @@ func sealTimeOnlyFixture(tb testing.TB, names, perName int, seed int64) (*coreRo
 		if err != nil {
 			tb.Fatal(err)
 		}
-		r.install(id, m, metricMetadata{})
+		rollupTestInstall(r, id, m, metricMetadata{})
 		metrics[i] = m
 	}
 	batches := make([]Batch, 0, names*perName)

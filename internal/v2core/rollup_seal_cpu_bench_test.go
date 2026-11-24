@@ -47,7 +47,7 @@ func sealCPUFixture(tb testing.TB, shape sealCPUShape, names int) (*coreRollups,
 		if err != nil {
 			tb.Fatal(err)
 		}
-		r.install(id, m, freshMetadata)
+		rollupTestInstall(r, id, m, freshMetadata)
 		rows := make([]Row, shape.points)
 		for j := range rows {
 			rows[j] = Row{Time: 100000 + int64(j)*shape.step, Bits: uint64(rng.Int63()), Seq: uint64(j + 1)}
