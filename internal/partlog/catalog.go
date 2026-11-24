@@ -371,6 +371,12 @@ func (c *NameCatalog) InternHashed(key string, definition []byte, hash uint64) (
 	return id, nil
 }
 
+// Find returns the ID of an existing exact name, or zero when it is absent.
+// It uses the catalog's existing index and never admits or changes a definition.
+func (c *NameCatalog) Find(key string) uint64 {
+	return c.ids.lookup(key, NameHash(key), c)
+}
+
 // Lookup returns catalog-owned immutable metadata; callers must not modify it.
 func (c *NameCatalog) Lookup(id uint64) (string, []byte, bool) {
 	if id == 0 || id > c.Count() {

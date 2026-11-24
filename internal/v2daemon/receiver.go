@@ -47,8 +47,8 @@ const maxFileNameBytes = 255 // NAME_MAX on Linux filesystems
 
 // applicationOwner maps a name to its producer-local catalog ID with one
 // namefp.Table probe keyed by the name's 96-bit fingerprint. No name bytes are
-// read or kept: a miss proves the name is new, and it resolves the policy and
-// registers once per lifetime.
+// read or kept. A miss checks the producer catalog first; only a name absent
+// there resolves its admission policy and registers a new identity.
 type applicationOwner struct {
 	p        *Producer
 	resolve  PolicyResolver
@@ -66,13 +66,30 @@ func (o *applicationOwner) register(name string, fp namefp.Fingerprint) (uint32,
 	if err := checkNameLimits(name); err != nil {
 		return 0, err
 	}
-	policy, err := o.resolve(name)
-	if err != nil {
-		return 0, err
+	if o.p.failed != nil {
+		return 0, o.p.failed
 	}
-	_, id, err := o.p.RegisterApplication(name, policy)
-	if err != nil {
-		return 0, err
+	var id uint64
+	if o.p.catalog != nil && o.p.mirror == nil {
+		id = o.p.catalog.Find(name)
+	}
+	if id != 0 {
+		// Recovery already validated this name's immutable admission policy.
+		// The receiver table is process-local, so its first miss after restart
+		// must not repeat schema matching or classic-baseline admission I/O.
+		// Mirrored writes still validate against the live classic writer.
+		if _, _, err := o.p.application(id); err != nil {
+			return 0, err
+		}
+	} else {
+		policy, err := o.resolve(name)
+		if err != nil {
+			return 0, err
+		}
+		_, id, err = o.p.RegisterApplication(name, policy)
+		if err != nil {
+			return 0, err
+		}
 	}
 	if id > namefp.MaxLocal {
 		return 0, errors.New("receiver name table: producer catalog ID exceeds 32 bits")
