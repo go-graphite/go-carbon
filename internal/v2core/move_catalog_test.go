@@ -38,6 +38,7 @@ func movePart(t *testing.T, source byte, id, order uint64, samples ...sealrollup
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer plan.Abort()
 	if len(plan.Files) != 1 {
 		t.Fatalf("files %d", len(plan.Files))
 	}

@@ -35,6 +35,7 @@ func TestMoveAdoptMatureHistoryKeepsPartsAndSparseRepairs(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		defer plan.Abort()
 		path := filepath.Join(t.TempDir(), "part.sst")
 		entries := plan.Files[0]
 		d, err := WriteDenseRollupPart(path, entries, v2part.Provenance{Incarnation: v2part.PartID{1}, Stream: "donor"})

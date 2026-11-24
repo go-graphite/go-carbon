@@ -24,6 +24,7 @@ func TestPortableRollupPartPublishedGCP3Compatibility(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer plan.Abort()
 	if len(plan.Files) != 1 {
 		t.Fatalf("files %d", len(plan.Files))
 	}
@@ -122,6 +123,7 @@ func TestPortableDenseRollupPartPublishedGCP3Compatibility(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer plan.Abort()
 	if len(plan.Files) != 1 {
 		t.Fatalf("files %d", len(plan.Files))
 	}
@@ -218,6 +220,7 @@ func TestPortableDenseNewestSingletonWins(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	defer plan.Abort()
 	dir := t.TempDir()
 	older := filepath.Join(dir, "older.sst")
 	source := v2part.Provenance{Incarnation: v2part.PartID{9}, Stream: "original"}
@@ -300,6 +303,7 @@ func TestDenseRuntimeSealExport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer plan.Abort()
 	if len(plan.Files) != 1 {
 		t.Fatalf("files %d", len(plan.Files))
 	}

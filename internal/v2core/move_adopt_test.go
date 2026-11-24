@@ -40,6 +40,7 @@ func adoptDonor(t *testing.T, policy []byte, samples ...sealrollup.Sample) MoveP
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer plan.Abort()
 	path := filepath.Join(t.TempDir(), "donor.sst")
 	d, err := WriteDenseRollupPart(path, plan.Files[0], v2part.Provenance{Incarnation: v2part.PartID{1}, Stream: "donor"})
 	if err != nil {

@@ -25,6 +25,7 @@ func TestHeldPartOutlivesRetirement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer plan.Abort()
 	stage := filepath.Join(root, "stage.sst")
 	d, err := WriteDenseRollupPart(stage, plan.Files[0], v2part.Provenance{Incarnation: v2part.PartID{1}, Stream: "test"})
 	if err != nil {

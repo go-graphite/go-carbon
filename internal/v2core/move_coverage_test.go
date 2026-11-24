@@ -85,6 +85,7 @@ func testMoveAdoptRetiredDonorCoverage(t *testing.T, method sealrollup.Method) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		defer plan.Abort()
 		var entries []KV
 		var template v2part.Key
 		for _, kv := range plan.Files[0] {
