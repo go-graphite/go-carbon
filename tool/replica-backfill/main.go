@@ -40,9 +40,22 @@ func (u *urlList) Set(v string) error {
 	return nil
 }
 
+// dumpPaths preserves paths verbatim (commas and trailing slashes are not URL separators).
+type dumpPaths []string
+
+func (p *dumpPaths) String() string { return strings.Join(*p, ",") }
+func (p *dumpPaths) Set(v string) error {
+	if v == "" {
+		return errors.New("empty source dump path")
+	}
+	*p = append(*p, v)
+	return nil
+}
+
 type options struct {
 	local, ingest      string
 	replicas           urlList
+	sourceDumps        dumpPaths
 	from, until        string
 	since, settle      time.Duration
 	uncleanStart       bool
@@ -123,6 +136,7 @@ func parseFlags(args []string) (*options, error) {
 	fs.StringVar(&o.local, "local", "http://127.0.0.1:8080", "local carbonserver URL")
 	fs.StringVar(&o.ingest, "ingest", "127.0.0.1:2003", "local plaintext receiver address")
 	fs.Var(&o.replicas, "replica", "replica carbonserver URL; repeat or comma-separate, tried in order")
+	fs.Var(&o.sourceDumps, "source-dump", "offline reader JSONL file (plain or gzip); repeat for ordered fallback; excludes -replica")
 	fs.StringVar(&o.from, "from", "", "gap start: unix seconds or RFC3339")
 	fs.StringVar(&o.until, "until", "", "gap end: unix seconds or RFC3339 (default now minus -settle)")
 	fs.DurationVar(&o.since, "since", 0, "gap start relative to now, instead of -from")
@@ -162,8 +176,10 @@ func parseFlags(args []string) (*options, error) {
 		return nil, err
 	}
 	switch {
-	case len(o.replicas) == 0:
-		return nil, errors.New("at least one -replica is required")
+	case len(o.replicas) == 0 && len(o.sourceDumps) == 0:
+		return nil, errors.New("at least one -replica or -source-dump is required")
+	case len(o.replicas) > 0 && len(o.sourceDumps) > 0:
+		return nil, errors.New("-replica and -source-dump are mutually exclusive")
 	case o.batch <= 0 || o.workers <= 0 || o.replicaRPS <= 0:
 		return nil, errors.New("-batch, -concurrency and -replica-rps must be positive")
 	case o.uncleanStart && o.heartbeatFile == "":
@@ -418,6 +434,14 @@ func run(ctx context.Context, o *options, now time.Time) (report, error) {
 	}
 	for _, r := range o.replicas {
 		e.replicas = append(e.replicas, newClient(r, o, replicaLim))
+	}
+	for _, path := range o.sourceDumps {
+		dump, err := openDump(ctx, path, now.Unix())
+		if err != nil {
+			return report{}, fmt.Errorf("source dump %s: %w", path, err)
+		}
+		defer dump.Close()
+		e.replicas = append(e.replicas, &client{base: "dump:" + path, dump: dump})
 	}
 	if o.checkpoint != "" && !o.dryRun {
 		if e.ckpt, err = loadCheckpoint(o.checkpoint, from, until); err != nil {

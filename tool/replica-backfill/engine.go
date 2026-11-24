@@ -278,7 +278,7 @@ func (e *engine) process(ctx context.Context, b batch) error {
 		if i > 0 {
 			e.stats.fallbackMetrics.Add(int64(len(pending)))
 		}
-		got, err := r.fetch(ctx, pending, e.cfg.from-1, e.cfg.until)
+		got, err := r.fetchSource(ctx, pending, e.cfg.from-1, e.cfg.until, gaps)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
