@@ -21,6 +21,27 @@ func pendingName(registered *v2core.ApplicationPolicy, policy []byte) (string, e
 	return string(p.Name), nil
 }
 
+// pendingRequestName reuses an exact request name after checking the admitted
+// identity, instead of decoding its reverse dictionary entry for every batch.
+func pendingRequestName(sealed *v2core.RollupSnapshot, registered *v2core.ApplicationPolicy, policy []byte, names []string) (string, error) {
+	if registered != nil {
+		for _, name := range names {
+			if sealed.MatchesName(name, registered) {
+				return name, nil
+			}
+		}
+		return "", nil
+	}
+	name, err := pendingName(nil, policy)
+	if err != nil {
+		return "", err
+	}
+	if slices.Contains(names, name) {
+		return name, nil
+	}
+	return "", nil
+}
+
 // pendingHash is the hash of pendingName without reading name bytes when the
 // application carries a registered identity.
 func pendingHash(registered *v2core.ApplicationPolicy, policy []byte) (uint64, error) {
@@ -71,10 +92,6 @@ func selectPending(ctx context.Context, sealed *v2core.RollupSnapshot, pending v
 	if err != nil || len(positions) == 0 {
 		return nil, err
 	}
-	wanted := make(map[string]bool, len(names))
-	for _, n := range names {
-		wanted[n] = true
-	}
 	var out []v2core.Batch
 	covered := -1 // positions before this belong to an application already taken
 	for _, i := range positions {
@@ -85,11 +102,11 @@ func selectPending(ctx context.Context, sealed *v2core.RollupSnapshot, pending v
 			continue
 		}
 		_, registered, policy := pending.Ref(i)
-		name, err := pendingName(registered, policy)
+		name, err := pendingRequestName(sealed, registered, policy, names)
 		if err != nil {
 			return nil, err
 		}
-		if wanted[name] {
+		if name != "" {
 			b, _, end := pending.Application(i)
 			out = append(out, b)
 			covered = end

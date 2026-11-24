@@ -51,10 +51,10 @@ func TestRollupInventoryAddsOnlyChangedNamesAndRewinds(t *testing.T) {
 	if second.metrics["inventory.b"] != third.metrics["inventory.b"] {
 		t.Fatal("unaffected name rebuilt on correction")
 	}
-	if first.metrics["inventory.a"].latest.meta.Frontier.Order != 1 || len(first.metricParts(first.metrics["inventory.a"])) != 1 {
+	if first.metrics["inventory.a"].latest.meta.Frontier.Order != 1 || len(first.metricParts("inventory.a", first.metrics["inventory.a"])) != 1 {
 		t.Fatal("old pinned directory mutated")
 	}
-	if len(third.metricParts(third.metrics["inventory.a"])) != 2 {
+	if len(third.metricParts("inventory.a", third.metrics["inventory.a"])) != 2 {
 		t.Fatal("added part missing")
 	}
 	rewind, err := NewRollupSnapshot(ctx, pins[0], third, nil, nil)

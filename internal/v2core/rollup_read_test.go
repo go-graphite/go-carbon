@@ -117,7 +117,7 @@ func TestRollupSnapshotSeeksAndReusesImmutableParts(t *testing.T) {
 			if same.metrics[string(policy.Name)] != index.metrics[string(policy.Name)] {
 				t.Fatal("unchanged inventory rebuilt metric directory")
 			}
-			if len(same.metricPartIDs(same.metrics[string(policy.Name)])) != len(same.metricParts(same.metrics[string(policy.Name)])) {
+			if len(same.metricPartIDs(same.metrics[string(policy.Name)])) != len(same.metricParts(string(policy.Name), same.metrics[string(policy.Name)])) {
 				t.Fatal("snapshot part membership is incomplete")
 			}
 			all, err := index.Records(ctx, string(policy.Name))
@@ -253,7 +253,7 @@ func TestRollupSnapshotSeeksAndReusesImmutableParts(t *testing.T) {
 
 func (s *RollupSnapshot) metricPartIDs(m *snapshotMetric) map[string]struct{} {
 	ids := map[string]struct{}{}
-	for _, p := range s.metricParts(m) {
+	for _, p := range s.metricParts(m.latest.Name(), m) {
 		ids[p.part.id] = struct{}{}
 	}
 	return ids

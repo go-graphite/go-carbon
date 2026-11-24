@@ -10,8 +10,8 @@ import (
 // memtable is the append level: the newest entries since the last flush, in
 // a byte arena (u16 key length, key, value) with two open-addressing tables
 // of record numbers, by key and by (scope, ID). It holds no per-name Go
-// objects; its size is bounded by Options.BufferBytes, except that it keeps
-// filling while the previous one is flushed. The arena is fixed 64 KiB
+// objects; a full table waits for the previous flush. Concurrent append
+// holds can exceed Options.BufferBytes by at most batchNames per writer. The arena is fixed 64 KiB
 // chunks that never move, so it grows without copying itself. A key appears
 // once: a later put of the same key (a flag change, a revival) rewrites the
 // value in place.

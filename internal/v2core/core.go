@@ -35,7 +35,7 @@ var coreMetaKey = []byte{0xff, 'f'}
 type coreConfig struct {
 	// SealInterval is a runtime threshold, independent of the persisted format.
 	SealInterval time.Duration `json:"-"`
-	// PublishInterval spaces head-only pending publications; zero is one second.
+	// PublishInterval spaces head-only pending publications; zero is 500 ms.
 	PublishInterval            time.Duration `json:"-"`
 	SealMaxRows                int           `json:"-"`
 	Rollups                    bool
@@ -968,7 +968,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	var pendingMerge pendingCompaction
 	publishInterval := o.cfg.PublishInterval
 	if publishInterval == 0 {
-		publishInterval = time.Second
+		publishInterval = 500 * time.Millisecond
 	}
 	sealInterval := o.cfg.SealInterval
 	if sealInterval == 0 {
@@ -1127,7 +1127,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		}
 	}
 	// startSeal freezes the head and seals it in the background. The owner
-	// keeps admitting rows into a new head and publishing it every second.
+	// keeps admitting rows into a new head and publishing it on its own cadence.
 	// Callers ensure no seal is in flight.
 	startSeal := func() error {
 		if slices.Equal(pending, o.meta.Cursors) && !o.maintenance && !l0Loaded {
@@ -1322,7 +1322,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			if asyncSeal && failure == nil && flight != nil && fullHead(q.peek(), producer) {
 				// Backpressure without blocking the loop: the packet stays queued
 				// and its producer waits on the full queue, as for any full queue.
-				// The loop keeps publishing the admitted head every second and
+				// The loop keeps publishing the admitted head on its own cadence and
 				// polling the flight; the seal goroutine wakes it when done.
 				if failure = pollFlight(); failure != nil {
 					o.failure.CompareAndSwap(nil, &coreFailure{err: failure})

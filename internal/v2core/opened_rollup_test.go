@@ -64,6 +64,7 @@ func TestOpenedRollupTwentyThousandParts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer plan.Abort()
 	file := plan.Files[0]
 	template, err := WriteDenseRollupPart(filepath.Join(root, "template.sst"), file, v2part.Provenance{Incarnation: v2part.PartID{1}, Stream: "test"})
 	if err != nil {
@@ -136,6 +137,7 @@ func TestOpenedRollupTwentyThousandParts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer targetPlan.Abort()
 	install(20000, targetPlan.Files[0])
 	inventory, err := loadRollupInventory(db)
 	if err != nil {

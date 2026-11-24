@@ -84,7 +84,7 @@ type metricIDs struct {
 // vshard) takes its remembered dictionary ID without the dictionary.
 func (c *metricIDs) key(k v2part.Key, name v2part.ID) (v2part.Key, bool, error) {
 	if !k.ByID {
-		if c.known != nil {
+		if name == "" && c.known != nil {
 			name = c.known.metricName()
 		}
 		k.Metric, k.Local = name, 0
@@ -97,7 +97,7 @@ func (c *metricIDs) key(k v2part.Key, name v2part.ID) (v2part.Key, bool, error) 
 		}
 	}
 	if c.state == 0 || c.group != k.Group || c.vshard != k.VShard {
-		if c.known != nil {
+		if name == "" && c.known != nil {
 			name = c.known.metricName()
 		}
 		found, ok, err := metricKey(k, name, c.dict)

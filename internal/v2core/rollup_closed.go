@@ -43,7 +43,7 @@ func (s *RollupSnapshot) scanWindows(ctx context.Context, name string, archive i
 	}
 	return windowRecords(c, meta, archive, first, last, stored, func(l int, first, last int64, from uint64) ([]sealrollup.Version, error) {
 		var out []sealrollup.Version
-		err := s.eachPartRecord(ctx, m, s.metricParts(m), l, first, last, true, func(part *readPartMetric) bool {
+		err := s.eachPartRecord(ctx, name, m, s.metricParts(name, m), l, first, last, true, func(part *readPartMetric) bool {
 			return s.moves[m] == nil && from > 0 && part.meta.Frontier.Order != 0 && part.meta.Frontier.Order < from
 		}, func(r sealrollup.Record, origin partOrigin) error {
 			v := r.Version()

@@ -1,7 +1,6 @@
 package v2read
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -267,7 +266,7 @@ func (g *generation) lookup(name string) *metricState {
 	return &metricState{policy: p, meta: meta, sealed: g.sealed, name: name, reader: g.reader, resource: g}
 }
 
-func (g *generation) loadPendingContext(ctx context.Context) {
+func (g *generation) loadPendingContext(ctx context.Context, names ...string) {
 	g.metrics = make(map[string]*metricState)
 	pending := g.pending
 	if pending == nil && g.view.Len() > 0 {
@@ -284,7 +283,18 @@ func (g *generation) loadPendingContext(ctx context.Context) {
 			g.err = errors.New("pending batch without registered policy")
 			return
 		}
-		name := h.Name()
+		var name string
+		if len(names) == 0 {
+			name = h.Name()
+		} else {
+			name, g.err = pendingRequestName(g.sealed, h, nil, names)
+			if g.err != nil || name == "" {
+				if g.err == nil {
+					g.err = errors.New("pending identity does not match request")
+				}
+				return
+			}
+		}
 		m := g.metrics[name]
 		if m == nil {
 			m = &metricState{name: name, reader: g.reader, resource: g}
@@ -297,7 +307,7 @@ func (g *generation) loadPendingContext(ctx context.Context) {
 		}
 		// One catalog hands every batch of an ID the same handle: compare the
 		// definition bytes once per name, then only the handle.
-		if m.meta.ID != b.ID || (h != m.identity && !bytes.Equal(m.meta.Policy, h.Definition())) {
+		if m.meta.ID != b.ID || (h != m.identity && !h.MatchesDefinition(m.meta.Policy)) {
 			g.err = errors.New("pending identity/policy mismatch")
 			return
 		}
@@ -586,7 +596,7 @@ func (g *generation) forNames(ctx context.Context, names []string, st *stageCoun
 	st.observe(StagePending, stage)
 	q := &generation{pending: pending, sealed: index, reader: g.reader, cache: g.cache, number: g.number}
 	stage = time.Now()
-	q.loadPendingContext(ctx)
+	q.loadPendingContext(ctx, names...)
 	st.observe(StageLoadPending, stage)
 	return q, q.err
 }

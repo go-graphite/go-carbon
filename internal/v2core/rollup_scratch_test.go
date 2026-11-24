@@ -121,7 +121,7 @@ func TestSealScratchReuseAcrossGC(t *testing.T) {
 func TestSealScratchIdleBound(t *testing.T) {
 	drainRollupScratchPool()
 	defer drainRollupScratchPool()
-	planners := make([]*coreRollups, cap(rollupScratchPool)+1)
+	planners := make([]*coreRollups, cap(rollupScratchPool))
 	for i := range planners {
 		planners[i] = newCoreRollups()
 		planners[i].takeScratch()
@@ -131,6 +131,69 @@ func TestSealScratchIdleBound(t *testing.T) {
 	}
 	if len(rollupScratchPool) != cap(rollupScratchPool) {
 		t.Fatalf("idle working sets = %d, want %d", len(rollupScratchPool), cap(rollupScratchPool))
+	}
+}
+
+// A plan owns its workspace until Commit/Abort. Slow dictionary writes must
+// stop the next planner before it allocates another seal's stages and outputs.
+func TestSealScratchWaitsForResolution(t *testing.T) {
+	for _, commit := range []bool{false, true} {
+		t.Run(fmt.Sprint(commit), func(t *testing.T) {
+			drainRollupScratchPool()
+			defer drainRollupScratchPool()
+			owners := make([]*coreRollups, cap(rollupScratchPool))
+			plans := make([]coreSealPlan, len(owners))
+			defer func() {
+				for i, r := range owners {
+					if r != nil && r.pending {
+						plans[i].Abort()
+					}
+				}
+			}()
+			for i := range owners {
+				r, batches := sealTimeOnlyFixture(t, 1, 1, int64(i))
+				plan, err := r.planParts(coreSealInput{Batches: batches})
+				if err != nil {
+					t.Fatal(err)
+				}
+				owners[i], plans[i] = r, plan
+			}
+			r, batches := sealTimeOnlyFixture(t, 1, 1, 99)
+			type result struct {
+				plan coreSealPlan
+				err  error
+			}
+			done := make(chan result, 1)
+			go func() {
+				plan, err := r.planParts(coreSealInput{Batches: batches})
+				done <- result{plan, err}
+			}()
+			select {
+			case got := <-done:
+				if got.err == nil {
+					got.plan.Abort()
+				}
+				t.Fatal("planner exceeded the active workspace bound")
+			case <-time.After(100 * time.Millisecond):
+			}
+			if commit {
+				plans[0].Commit()
+			} else {
+				plans[0].Abort()
+			}
+			select {
+			case got := <-done:
+				if got.err != nil {
+					t.Fatal(got.err)
+				}
+				got.plan.Abort()
+				if r.scratch != nil || r.retainedScratchBytes() != 0 {
+					t.Fatal("resolved plan retained its workspace")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("resolved plan did not release a workspace")
+			}
+		})
 	}
 }
 

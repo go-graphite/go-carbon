@@ -213,7 +213,7 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 	wanted := map[archivePartIdentity]bool{}
 	for name := range ids {
 		if metric := prepared.index.metrics[name]; metric != nil {
-			for _, part := range prepared.index.metricParts(metric) {
+			for _, part := range prepared.index.metricParts(name, metric) {
 				wanted[archivePartIdentity{part.part.key.Group, part.part.key.Part}] = true
 			}
 		}
@@ -473,7 +473,7 @@ func (s *RollupSnapshot) scanLegacyMoveArchive(ctx context.Context, name string,
 		// replacements compete with it; old underlying coarse rows stay masked.
 		live := *m
 		var liveParts []*readPartMetric
-		for _, part := range s.metricParts(m) {
+		for _, part := range s.metricParts(name, m) {
 			if part.part.origin.Class == LivePart {
 				liveParts = append(liveParts, part)
 			}

@@ -20,6 +20,7 @@ func ringEpochPart(t *testing.T, policy []byte, source byte, id, order uint64, c
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer plan.Abort()
 	path := filepath.Join(t.TempDir(), "epoch.sst")
 	d, err := WriteDenseRollupPart(path, plan.Files[0], v2part.Provenance{Incarnation: v2part.PartID{source}, Stream: "producer-0"})
 	if err != nil {

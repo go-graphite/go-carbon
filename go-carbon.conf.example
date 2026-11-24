@@ -1542,6 +1542,6 @@ seal-interval = "10s"
 seal-max-rows = 131072
 read-budget-bytes = 268435456
 # Seals key parts by a vshard-local ID from the store name dictionary
-# (<path>/<core>/dict) instead of the metric name. Name-keyed parts stay
-# readable. Vshard moves of ID-keyed parts are not supported yet.
-id-keys = false
+# (<path>/<core>/dict) instead of the metric name, by default. Set false to
+# write name-keyed seals; existing name-keyed parts remain readable.
+id-keys = true
