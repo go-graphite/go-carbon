@@ -97,6 +97,7 @@ func TestV2AdmissionPolicyDifferential(t *testing.T) {
 		t.Fatal(classic)
 	}
 	names := slices.Clone(legacy)
+	names = append(names, "legacy/hourly/min", "legacy..hourly.max", ".legacy.hourly.max", "legacy.hourly.max.", "legacy.\x00.min")
 	names = append(names, "aggregations.secondly.bplatform.foo.by_persona_cluster_pod.x.min", "aggregations.secondly.foo.by_persona_cluster_pod.x.sum", "aggregations.hourly.capacityservice.bplatform.secondly.x.pods.per_persona.mean", "plain.default", "quoted.\"name\\.sum")
 	rng := rand.New(rand.NewSource(1739))
 	for range 10000 {
@@ -135,8 +136,8 @@ func TestV2AdmissionPolicyDifferential(t *testing.T) {
 						refusals++
 					}
 				}
-				if scenario == "fixtures" && mode != v2Shadow && refusals != 2 {
-					t.Fatalf("%s refusals=%d, want mismatch + missing baseline", mode, refusals)
+				if scenario == "fixtures" && mode != v2Shadow && refusals != 6 {
+					t.Fatalf("%s refusals=%d, want mismatches, missing baseline and path refusals", mode, refusals)
 				}
 			}
 		})

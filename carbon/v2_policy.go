@@ -3,6 +3,7 @@ package carbon
 import (
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2core"
@@ -26,9 +27,11 @@ func (app *App) v2PolicyResolver(mode string, classicNames []string) v2daemon.Po
 			cfg.Archives = append(cfg.Archives, sealrollup.Archive{Step: int64(a.SecondsPerPoint()), Count: int64(a.NumberOfPoints())})
 		}
 		_, classic := slices.BinarySearch(classicNames, name)
-		// Direct v2 keeps classic history immutable. Its complete startup
-		// inventory proves absence; dual write may create classic names later.
-		if mode != v2Shadow && (mode == v2ServingDual || classic) {
+		// Only unambiguous classic names can use the inventory's absence proof.
+		// Slash/empty components may alias an inventoried file; NUL must retain
+		// the old path refusal. Live dual write can create names after startup.
+		ambiguous := strings.ContainsAny(name, "/\x00") || strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".") || strings.Contains(name, "..")
+		if mode != v2Shadow && (mode == v2ServingDual || classic || ambiguous) {
 			policy := v2read.Metric{AggregationMethod: agg.AggregationMethod().String(), XFilesFactor: cfg.XFilesFactor}
 			for _, archive := range cfg.Archives {
 				policy.Archives = append(policy.Archives, v2read.Archive{Step: archive.Step, Points: archive.Count})
