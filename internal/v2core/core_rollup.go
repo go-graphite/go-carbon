@@ -962,30 +962,37 @@ func recoverCoreRollups(db *pebble.DB, catalogs ...*PolicyCatalog) (*coreRollups
 	if len(catalogs) > 0 {
 		r.identities = catalogs[0]
 	}
-	snapshot := db.NewSnapshot()
+	copied, err := r.recover()
+	return r, copied, err
+}
+
+// recover installs the sealed owner state before its first reader or mutation.
+// The caller excludes all other accesses to the owner-local planner until done.
+func (r *coreRollups) recover() (bool, error) {
+	snapshot := r.db.NewSnapshot()
 	defer snapshot.Close()
 	copied, err := snapshotHasCopiedParts(snapshot)
 	if err != nil {
-		return nil, false, err
+		return false, err
 	}
 	if copied {
 		index, err := NewRollupSnapshot(context.Background(), snapshot, nil, r.identities, nil, 0)
 		if err != nil {
-			return nil, false, err
+			return false, err
 		}
 		for _, m := range index.metrics {
 			if index.moves[m] != nil && index.moves[m].copied && index.moves[m].authority == nil {
-				return nil, false, errors.New("copied-part catalog requires live reducer and numeric identity adoption before writable open")
+				return false, errors.New("copied-part catalog requires live reducer and numeric identity adoption before writable open")
 			}
 		}
 	}
 	if copied {
 		err = scanRollups(snapshot, r.identities, r.installRecovered)
-		return r, true, err
+		return true, err
 	}
 	iter, err := newArchiveIter(context.Background(), snapshot, rollupScanBounds())
 	if err != nil {
-		return nil, false, err
+		return false, err
 	}
 	defer iter.Close()
 	var keys partsformat.KeyDecoder
@@ -994,21 +1001,21 @@ func recoverCoreRollups(db *pebble.DB, catalogs ...*PolicyCatalog) (*coreRollups
 	for iter.First(); iter.Valid(); iter.Next() {
 		k, err := keys.Decode(iter.Key())
 		if err != nil {
-			return nil, false, err
+			return false, err
 		}
 		if k.Archive != rollupMetadataArchive {
 			continue
 		}
 		if err = names.resolve(&k); err != nil {
-			return nil, false, err
+			return false, err
 		}
 		entry := rollupScanEntry{group: k.Group}
 		if err = entry.addMetadata(r.identities, k, iter.Value(), &definition); err != nil {
-			return nil, false, err
+			return false, err
 		}
 		meta, err := entry.finish(k.Metric)
 		if err != nil || k.Ordinal != 0 {
-			return nil, false, errors.Join(err, errors.New("invalid recovery envelope"))
+			return false, errors.Join(err, errors.New("invalid recovery envelope"))
 		}
 		m := r.installed(meta.ID)
 		if m == nil {
@@ -1022,7 +1029,7 @@ func recoverCoreRollups(db *pebble.DB, catalogs ...*PolicyCatalog) (*coreRollups
 		r.install(meta.ID, m, entry.meta)
 	}
 	err = iter.Error()
-	return r, copied, err
+	return copied, err
 }
 
 // installRecovered installs one name rebuilt from parts.

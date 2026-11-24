@@ -576,6 +576,9 @@ func (r *Reader) viewsForNames(ctx context.Context, pinned []*generation, names 
 // forNames creates request-local metadata; no request waits for a whole-store
 // generation loader. The caller retains the publication through this call.
 func (g *generation) forNames(ctx context.Context, names []string, st *stageCounters) (*generation, error) {
+	if err := g.inventory.AwaitHydration(ctx); err != nil {
+		return nil, err
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -605,6 +608,9 @@ func (g *generation) forNames(ctx context.Context, names []string, st *stageCoun
 // so overlapping generations never independently reload the same new parts.
 // Without legacy rows it reads registry-held parts only, never a snapshot.
 func (g *generation) discover(ctx context.Context) (*generation, error) {
+	if err := g.inventory.AwaitHydration(ctx); err != nil {
+		return nil, err
+	}
 	c := g.cache
 	select {
 	case <-ctx.Done():

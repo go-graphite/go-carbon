@@ -214,6 +214,10 @@ func coreWake(wake chan struct{}) {
 }
 
 type coreOwner struct {
+	hydrateOnce sync.Once
+	hydrate     func() error
+	hydrateErr  error
+
 	ready          []atomic.Uint64
 	work           chan struct{}
 	nextPoll       time.Time // execution-owner local seal deadline
@@ -535,7 +539,24 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 				if err = db.Set(rollupDirectoryKey, []byte(absolute), pebble.Sync); err != nil {
 					return err
 				}
-				r, copied, err := recoverCoreRollups(db, identities)
+				lazy, err := deferOwnerRollups(db, identities.partDict())
+				if err != nil {
+					return err
+				}
+				r := newCoreRollups()
+				r.db, r.identities = db, identities
+				var copied bool
+				if lazy {
+					o.hydrate = func() error {
+						if o.stage != nil {
+							o.stage("owner-hydration")
+						}
+						_, err := r.recover()
+						return err
+					}
+				} else {
+					copied, err = r.recover()
+				}
 				if err != nil {
 					return err
 				}
@@ -584,6 +605,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 					return err
 				}
 				o.gc.moveEpoch = moveEpoch
+				o.gc.inventory.hydrate = o.ensureHydrated
 			}
 			for range cfg.Producers {
 				// The producer lease budget bounds total admitted bytes. Let each
@@ -1027,6 +1049,9 @@ func (o *coreOwner) poller() func() (bool, bool) {
 	// Row-hook publication clones the head; it keeps synchronous seals.
 	asyncSeal := o.hook == nil
 	publishBatches := func() error {
+		if err := o.ensureHydrated(); err != nil {
+			return err
+		}
 		// L0 files precede visibility: a render never shows a row a kill -9
 		// loses. Without a publication hook they still follow its cadence.
 		if o.cfg.L0 && pend.n > l0Written {
@@ -1495,6 +1520,10 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			// Keep inactivity detection independent of the larger seal threshold.
 			// The application callback requests its existing intake fence before
 			// allowing expiry; only an allowed expiry or new metadata needs a seal.
+			if err := o.ensureHydrated(); err != nil {
+				failure = err
+				o.failure.CompareAndSwap(nil, &coreFailure{err: err})
+			}
 			r := o.rollups
 			now := time.Now()
 			if r.now != nil {
@@ -1636,6 +1665,9 @@ func sortCoreRows(head []row, seconds int64) {
 // sealBatches seals points admitted rows whose earliest time is oldest.
 // Without base rows the rollup planner reads pending directly and head is empty.
 func (o *coreOwner) sealBatches(head []row, points int, oldest int64, pending PendingView, next coreFrontier) (uint64, error) {
+	if err := o.ensureHydrated(); err != nil {
+		return 0, err
+	}
 	if err := o.observeSealedMergeBudget(); err != nil {
 		return 0, err
 	}

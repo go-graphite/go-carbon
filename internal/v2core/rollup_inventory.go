@@ -18,6 +18,9 @@ import (
 // bindings. It contains no snapshot or live writer objects. The core copies the
 // small map on seal/retirement and shares each existing descriptor's bytes.
 type RollupInventory struct {
+	// hydrate fences this owner's deferred writable inventory. Derived binding
+	// sets share the same once-only fence; no name state lives in this handle.
+	hydrate  func() error
 	bindings map[string][]byte
 	bytes    int64
 	registry *partRegistry // opened parts, shared by every inventory derived from one load
@@ -40,7 +43,7 @@ func (s *RollupInventory) with(added []coreKV, removed map[v2part.Digest]bool) *
 	if len(added) == 0 && len(removed) == 0 {
 		return s
 	}
-	out := &RollupInventory{bindings: maps.Clone(s.bindings), bytes: s.bytes, registry: s.registry}
+	out := &RollupInventory{bindings: maps.Clone(s.bindings), bytes: s.bytes, registry: s.registry, hydrate: s.hydrate}
 	for _, kv := range added {
 		if old, ok := out.bindings[string(kv.Key)]; ok {
 			out.bytes -= int64(len(kv.Key) + len(old) + 64)
@@ -253,4 +256,18 @@ func initialRollupInventory(ctx context.Context, snapshot *pebble.Snapshot) (map
 		}
 	}
 	return inventory, scopes, nil
+}
+
+// AwaitHydration waits before a reader uses this owner's policies or names.
+// A nil inventory belongs to a standalone/eager reader and needs no fence.
+func (s *RollupInventory) AwaitHydration(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s != nil && s.hydrate != nil {
+		if err := s.hydrate(); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
 }

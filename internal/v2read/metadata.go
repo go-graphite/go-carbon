@@ -262,3 +262,27 @@ func (r *Reader) Masked(ctx context.Context, name string) (bool, error) {
 	}
 	return masked, err
 }
+
+// AwaitHydration fences find's projected names on their physical owners. With
+// no names (directory or negative lookup) it fences every owner. Render and
+// metadata requests also fence selected owners in forNames.
+func (r *Reader) AwaitHydration(ctx context.Context, names ...string) error {
+	pins, err := r.loadOwners(ctx)
+	if err != nil {
+		return err
+	}
+	defer releaseOwners(pins)
+	errs := make([]error, len(pins))
+	selected := make([]bool, len(pins))
+	for _, name := range names {
+		selected[OwnerFor(name, len(pins))] = true
+	}
+	var wg sync.WaitGroup
+	for i, g := range pins {
+		if g != nil && (len(names) == 0 || selected[i]) {
+			wg.Go(func() { errs[i] = g.inventory.AwaitHydration(ctx) })
+		}
+	}
+	wg.Wait()
+	return errors.Join(errs...)
+}

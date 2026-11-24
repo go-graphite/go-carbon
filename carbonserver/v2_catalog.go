@@ -14,18 +14,23 @@ import (
 // v2CatalogBinding pins immutable catalog publications without a build mutex.
 type v2CatalogBinding struct {
 	source v2index.Source
+	fence  func(context.Context, ...string) error
 	image  atomic.Pointer[v2CatalogImage]
 }
 type v2CatalogImage struct{ snapshot *v2index.Snapshot }
 
 // SetV2Catalog attaches the published name projection. Requests only pin a
-// snapshot: neither attaching nor querying constructs another whole-name index.
-func (l *CarbonserverListener) SetV2Catalog(source v2index.Source) error {
+// snapshot; the optional fence validates selected owners before returning names.
+// Neither attaching nor querying constructs another whole-name index.
+func (l *CarbonserverListener) SetV2Catalog(source v2index.Source, fence ...func(context.Context, ...string) error) error {
 	if source == nil {
 		l.v2Catalog.Store(nil)
 		return nil
 	}
 	binding := &v2CatalogBinding{source: source}
+	if len(fence) > 0 {
+		binding.fence = fence[0]
+	}
 	if _, err := binding.load(l); err != nil {
 		return err
 	}
@@ -132,6 +137,20 @@ func (l *CarbonserverListener) expandV2CatalogContext(ctx context.Context, bindi
 	for i, path := range files {
 		leafs[i] = strings.HasSuffix(path, ".wsp")
 		files[i] = strings.ReplaceAll(strings.TrimSuffix(strings.TrimPrefix(path, "/"), ".wsp"), "/", ".")
+	}
+	if binding.fence != nil {
+		// Leaf matches select their physical owners. Directories and negative
+		// lookups may touch any owner, so they require the complete fence.
+		names := files
+		for _, leaf := range leafs {
+			if !leaf {
+				names = nil
+				break
+			}
+		}
+		if err := binding.fence(ctx, names...); err != nil {
+			return &ExpandedGlobResponse{Name: query, Err: err}
+		}
 	}
 	return &ExpandedGlobResponse{query, files, leafs, nil, 0, nil}
 }
