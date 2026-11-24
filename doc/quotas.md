@@ -77,6 +77,16 @@ The `carbon.agents.{host}` is from config `common.graph-prefix`.
 
 We can also define a prefix for the generated path, using `stat-metric-prefix` for each matched patterns.
 
+The internal stats reporter drains large quota reports through its bounded
+4,096-point send queue, waiting for the sender when necessary. One shared
+5-second budget bounds queue waits for the whole report; shutdown cancels those
+waits. This runs in the reporter goroutine, independently of metric ingestion.
+An unavailable or slow stats endpoint can still cause drops after the budget is
+exhausted. `internal_stats_dropped_total` counts these points on the Prometheus
+endpoint, independently of the stats queue and logging level, and survives
+collector recreation on configuration reload. Existing stat names, values,
+timestamps, and endpoint routing are unchanged.
+
 ## How to enable Quotas
 
 For go-carbon.conf:
