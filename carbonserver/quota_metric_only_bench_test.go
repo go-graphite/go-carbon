@@ -93,6 +93,10 @@ func BenchmarkQuotaMetricOnly(b *testing.B) {
 						ps.Metric = names[j]
 						var throttled bool
 						if cachedRoute {
+							if !inCache {
+								// A newly admitted cache item has no saved route.
+								states[j] = nil
+								}
 							throttled = listener.ShouldThrottleMetricWithHash(ps, inCache, hashes[j], &states[j])
 						} else {
 							throttled = listener.ShouldThrottleMetric(ps, inCache)
