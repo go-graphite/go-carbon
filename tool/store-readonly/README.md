@@ -3,6 +3,8 @@
 `store-readonly` reads an existing, stopped chunkstore using `Options.ReadOnly`.
 It retains database locking, disables maintenance, and refuses filesystem mutations.
 It has no listener, import operation, catalogue walk, or write mode.
+An existing incremental-migration marker retains its recorded source binding;
+the reader verifies that source's identity without changing it.
 
 Build with `CGO_ENABLED=0 go build -mod=vendor ./tool/store-readonly`.
 Feed one JSON request per line:

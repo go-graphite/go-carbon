@@ -12,6 +12,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
@@ -54,8 +55,24 @@ func inspect(directory string, input io.Reader, output io.Writer) (err error) {
 	if err != nil {
 		return err
 	}
-	opts := store.Options{ReadOnly: true, ExactBlocks: true, CacheSize: 128 << 20, MetadataCacheSize: 1 << 20}
-	if strings.TrimSpace(string(marker)) != "go-carbon-chunks-v4" {
+	version, parseErr := strconv.Atoi(strings.TrimPrefix(strings.TrimSpace(string(marker)), "go-carbon-chunks-v"))
+	if parseErr != nil {
+		return errors.New("invalid chunkstore format marker")
+	}
+	opts := store.Options{ReadOnly: true, ExactBlocks: version >= 4, CacheSize: 128 << 20, MetadataCacheSize: 1 << 20}
+	// Preserve the database's existing source binding. Read-only Open verifies
+	// the original identity and never creates a token or upgrades the marker.
+	binding, bindingErr := os.ReadFile(filepath.Join(directory, "INCREMENTAL-FILE-MIGRATION"))
+	if bindingErr == nil {
+		parts := strings.Split(string(binding), "\n")
+		if len(parts) != 4 || (parts[0] != "go-carbon-incremental-v1" && parts[0] != "go-carbon-incremental-v2") || !filepath.IsAbs(parts[1]) {
+			return errors.New("invalid incremental source binding")
+		}
+		opts.IncrementalSource = parts[1]
+	} else if !errors.Is(bindingErr, os.ErrNotExist) {
+		return bindingErr
+	}
+	if version >= 6 {
 		opts.Continuation = &whisperio.ContinuationCodec{}
 		opts.TimeBuckets = true
 	}

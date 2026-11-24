@@ -60,6 +60,11 @@ func TestInspectPreservesFilesAndPoints(t *testing.T) {
 				opts.Continuation = &whisperio.ContinuationCodec{}
 				opts.TimeBuckets = true
 			}
+			source := filepath.Join(t.TempDir(), "original")
+			if err := os.Mkdir(source, 0700); err != nil {
+				t.Fatal(err)
+			}
+			opts.IncrementalSource = source
 			db, err := store.Open(dir, opts)
 			if err != nil {
 				t.Fatal(err)
