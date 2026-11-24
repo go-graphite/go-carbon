@@ -355,6 +355,18 @@ func (s *RollupSnapshot) LookupMetadata(name string) (RollupPolicy, RollupMetada
 	return policy, meta, true
 }
 
+// MatchesName checks a pending identity against the request's exact name.
+// Sealed metadata already holds the canonical handle; pending-only identities
+// compare through the dictionary's forward index without reconstructing names.
+func (s *RollupSnapshot) MatchesName(name string, h *ApplicationPolicy) bool {
+	if s != nil {
+		if m := s.metrics[name]; m != nil && m.latest.PolicyIdentity == h {
+			return true
+		}
+	}
+	return h.matchesName(name)
+}
+
 // MetricVersion identifies an immutable name's complete part set and metadata.
 // It owns no snapshot; equality proves archive records are unchanged, including
 // reset, retirement and rewind. Consumers may retain it in bounded caches.

@@ -74,6 +74,9 @@ func TestIDKeysRequestName(t *testing.T) {
 		catalog := identity.catalog
 		identity.catalog = &PolicyCatalog{}
 		defer func() { identity.catalog = catalog }()
+		if !index.MatchesName(name, identity) {
+			t.Fatal("request identity lost its exact name")
+		}
 		if index.MetricVersion(name) == nil {
 			t.Fatal("missing part identity")
 		}

@@ -747,19 +747,23 @@ func (d *Dict) flush() error {
 }
 
 // freeze hands the append level, every shard of it, to a background flush
-// and starts the next log, so appends never wait on a level file write;
+// and starts the next log; a full append level waits for the previous flush;
 // force freezes a non-empty append level below BufferBytes. The next log is
 // created before the shard locks are taken. The frozen level stays readable
-// in the snapshot until its level file replaces it. While one flush runs,
-// the append level keeps growing. A failure is sticky: appends stop, reads
-// go on.
+// in the snapshot until its level file replaces it. No shard or dictionary
+// lock is held while waiting for that flush. A failure is sticky: appends
+// stop, reads go on.
 func (d *Dict) freeze(force bool) error {
 	d.freezeMu.Lock()
 	defer d.freezeMu.Unlock()
 	size := d.bufSize.Load()
-	if d.snap.Load().frozen != nil || size == 0 || (!force && size < int64(d.opt.BufferBytes)) {
+	if size == 0 || (!force && size < int64(d.opt.BufferBytes)) {
 		return nil
 	}
+	if d.snap.Load().frozen != nil {
+		_ = hook("append-wait")
+	}
+	d.flushWG.Wait()
 	d.mu.RLock()
 	seq, err := d.logSeq+1, d.writable()
 	d.mu.RUnlock()
@@ -861,8 +865,6 @@ func (d *Dict) writeFrozen(frozen []*memtable, minSeq, maxSeq uint64) {
 	for seq := minSeq; seq <= maxSeq; seq++ {
 		os.Remove(logPath(d.dir, seq))
 	}
-	// Appends filled the next append level meanwhile: hand it on.
-	d.maybeFreeze()
 	d.maybeMerge()
 }
 
