@@ -80,8 +80,49 @@ func TestRollupInstalledFingerprintID(t *testing.T) {
 		t.Fatal("installed name entered pending new names")
 	}
 	// A corrupt/outdated slot must be rejected before indexing owner arrays.
+	ms[0].ownerSlot.Store(0)
 	r.names.Put(ms[0].fingerprint(), uint32(len(r.ids)+100))
 	if r.installed(ms[0].id) != nil {
 		t.Fatal("out-of-bounds fingerprint slot accepted")
+	}
+}
+
+// Another owner can overwrite a shared hint with an in-bounds slot occupied by
+// a different ID here. Installed lookup must then fall back to this owner's table.
+func TestRollupInstalledOverwrittenHint(t *testing.T) {
+	r := newCoreRollups()
+	adopter := newCoreRollups()
+	adopter.identities = r.identities
+	ms := make([]*PolicyIdentity, 2)
+	for i := range ms {
+		id := uint64(i + 7)
+		name := rankTestName(i)
+		_, raw := rollupTestPolicy(t, name, "10s:3d,1m:14d", sealrollup.Last, .1)
+		m, err := r.identities.intern(id, name, raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ms[i] = m
+		r.install(id, m, metricMetadata{Revision: id})
+	}
+	// Reverse installation order publishes valid hints for the adopter which
+	// point to the wrong numeric IDs in the donor.
+	for i := len(ms) - 1; i >= 0; i-- {
+		adopter.install(ms[i].id, ms[i], metricMetadata{Revision: 42})
+	}
+	for i, m := range ms {
+		if m.ownerSlot.Load() != uint32(2-i) {
+			t.Fatal("test did not overwrite donor hint")
+		}
+		if got := r.installed(m.id); got != m {
+			t.Fatal("overwritten hint did not fall back to installed fingerprint slot")
+		}
+		// A missing and an out-of-bounds hint require the same fallback.
+		for _, hint := range []uint32{0, uint32(len(r.ids) + 10)} {
+			m.ownerSlot.Store(hint)
+			if got := r.installed(m.id); got != ms[i] {
+				t.Fatal("missing or out-of-bounds hint did not fall back")
+			}
+		}
 	}
 }

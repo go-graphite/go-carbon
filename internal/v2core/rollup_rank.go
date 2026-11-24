@@ -116,7 +116,7 @@ func (r *coreRollups) metricRank(m *PolicyIdentity) uint32 {
 // passes ids[s] == id there, and the next renumber drops the slot.
 const deadSlot = math.MaxUint64
 
-// installed resolves identity before probing this owner's fingerprint table.
+// installed resolves identity before validating its owner-slot hint.
 func (r *coreRollups) installed(id uint64) *PolicyIdentity {
 	return r.installedIdentity(id, r.identities.lookup(id))
 }
@@ -132,6 +132,9 @@ func (r *coreRollups) nameSlot(id uint64, m *PolicyIdentity) (uint32, bool) {
 }
 
 func (r *coreRollups) installedIdentity(id uint64, m *PolicyIdentity) *PolicyIdentity {
+	if s, ok := r.hintSlot(m, id); ok {
+		return r.slotMetric(s)
+	}
 	if s, ok := r.nameSlot(id, m); ok {
 		return r.slotMetric(s)
 	}
