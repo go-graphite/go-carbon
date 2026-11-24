@@ -3,7 +3,10 @@ package persister
 import (
 	"fmt"
 	"regexp"
+	"regexp/syntax"
+	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // WhisperExpirationRule is one ordered metric expiration override.
@@ -14,6 +17,13 @@ type WhisperExpirationRule struct {
 	Grace      time.Duration
 	Exclude    *regexp.Regexp
 	Until      time.Time
+
+	// Pattern is public. Replacing it or recompiling it with UnmarshalText
+	// must not use filters derived from its previous expression.
+	literalPattern    *regexp.Regexp
+	literalExpression string
+	requiredPrefix    string
+	requiredLiteral   string
 }
 
 // WhisperExpirationRules contains metric expiration overrides in file order.
@@ -80,14 +90,62 @@ func ReadWhisperExpiration(filename string) (WhisperExpirationRules, error) {
 			}
 		}
 		rules = append(rules, WhisperExpirationRule{
-			Name:  section["name"],
-			Grace: grace, Exclude: exclude, Until: until,
-			Pattern:    pattern,
-			Expiration: expiration,
+			Name:              section["name"],
+			Pattern:           pattern,
+			Expiration:        expiration,
+			Grace:             grace,
+			Exclude:           exclude,
+			Until:             until,
+			literalPattern:    pattern,
+			literalExpression: patternText,
+			requiredPrefix:    compileMetricPattern(pattern).prefix,
+			requiredLiteral:   expirationRequiredLiteral(pattern),
 		})
 	}
 
 	return rules, nil
+}
+
+// expirationRequiredLiteral finds a case-sensitive literal that every match
+// must contain. Concatenation, captures and mandatory repetitions preserve
+// that requirement; optional expressions and alternatives are left alone.
+// This is only a rejection filter: the regexp still decides every match.
+func expirationRequiredLiteral(pattern *regexp.Regexp) string {
+	re, err := syntax.Parse(pattern.String(), syntax.Perl)
+	if err != nil {
+		return ""
+	}
+	var required func(*syntax.Regexp) string
+	required = func(re *syntax.Regexp) string {
+		switch re.Op {
+		case syntax.OpLiteral:
+			if re.Flags&syntax.FoldCase != 0 {
+				return ""
+			}
+			for _, r := range re.Rune {
+				// Regexp also matches invalid UTF-8 bytes as RuneError;
+				// a byte substring check would reject those valid matches.
+				if r == utf8.RuneError {
+					return ""
+				}
+			}
+			return string(re.Rune)
+		case syntax.OpRepeat:
+			if re.Min > 0 {
+				return required(re.Sub[0])
+			}
+		case syntax.OpCapture, syntax.OpConcat, syntax.OpPlus:
+			var longest string
+			for _, sub := range re.Sub {
+				if literal := required(sub); len(literal) > len(longest) {
+					longest = literal
+				}
+			}
+			return longest
+		}
+		return ""
+	}
+	return required(re)
 }
 
 // Match returns the expiration of the first matching rule, or fallback when
@@ -111,6 +169,10 @@ func (r WhisperExpirationRule) TTL() time.Duration {
 func (r WhisperExpirationRules) MatchIndex(metric string, now time.Time) int {
 	for i, rule := range r {
 		if !rule.Until.IsZero() && !now.Before(rule.Until) {
+			continue
+		}
+		if rule.literalPattern == rule.Pattern && rule.literalExpression == rule.Pattern.String() &&
+			(!strings.HasPrefix(metric, rule.requiredPrefix) || !strings.Contains(metric, rule.requiredLiteral)) {
 			continue
 		}
 		if rule.Pattern.MatchString(metric) && (rule.Exclude == nil || !rule.Exclude.MatchString(metric)) {
