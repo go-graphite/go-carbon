@@ -86,7 +86,7 @@ func (s *RollupSnapshot) scanWindows(ctx context.Context, name string, archive i
 
 // windowRecords yields archive's physical slots [first, last) in slot order,
 // each slot as its newest window at or before the frontier's window, computed
-// from stored versions by one lazy descent (sealrollup.OpenSlots): windows a
+// from stored versions by one lazy descent (sealrollup.ScanWindows): windows a
 // merge settled stop at their written-down value, every level's physical
 // range is read once. A slot keeps its stored per-slot winner (stored, the
 // winners of the range) when that equals the computed value (its order then
@@ -95,17 +95,20 @@ func windowRecords(c sealrollup.Config, meta metricMetadata, archive int, first,
 	a := c.Archives[archive]
 	open := meta.Frontier.MaxTime - meta.Frontier.MaxTime%a.Step
 	phys := (open / a.Step) % a.Count
-	windows := make([]int64, 0, last-first)
-	for p := first; p < last; p++ {
-		if w := open - ((phys-p+a.Count)%a.Count)*a.Step; w >= 0 {
-			windows = append(windows, w)
+	// A physical range crosses the frontier at most once. Keep its one or
+	// two time spans instead of expanding years of empty archive windows.
+	var windows [][2]int64
+	add := func(lo, hi, epoch int64) {
+		start, end := max(int64(0), epoch+lo*a.Step), epoch+hi*a.Step
+		if start < end {
+			windows = append(windows, [2]int64{start, end})
 		}
 	}
-	var computed []sealrollup.Sample // values in slot order (windows ascend by slot)
-	if err := sealrollup.OpenSlots(c, archive, windows, load, func(_ int64, p sealrollup.Sample, ok bool) {
-		if ok {
-			computed = append(computed, p)
-		}
+	add(first, min(last, phys+1), open-phys*a.Step)
+	add(max(first, phys+1), last, open-(phys+a.Count)*a.Step)
+	var computed []sealrollup.Sample
+	if err := sealrollup.ScanWindows(c, archive, windows, load, func(p sealrollup.Sample) {
+		computed = append(computed, p)
 	}, timeFirst...); err != nil {
 		return err
 	}
@@ -113,13 +116,18 @@ func windowRecords(c sealrollup.Config, meta metricMetadata, archive int, first,
 		slices.SortStableFunc(stored, func(x, y sealrollup.Record) int { return cmp.Compare(x.Slot, y.Slot) })
 	}
 	i, j := 0, 0
-	for p := first; p < last; p++ {
-		var old *sealrollup.Record
-		for i < len(stored) && stored[i].Slot < p {
-			i++
+	for i < len(stored) || j < len(computed) {
+		p := a.Count
+		if i < len(stored) {
+			p = stored[i].Slot
 		}
+		if j < len(computed) {
+			p = min(p, (computed[j].Time/a.Step)%a.Count)
+		}
+		var old *sealrollup.Record
 		if i < len(stored) && stored[i].Slot == p {
 			old = &stored[i]
+			i++
 		}
 		var v sealrollup.Sample
 		ok := j < len(computed) && (computed[j].Time/a.Step)%a.Count == p

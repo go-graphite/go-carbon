@@ -332,6 +332,8 @@ func (o *coreOwner) adoptMove(ctx context.Context, prepared *PreparedMove, ids m
 		}
 		local.Version = max(3, local.Version)
 		meta := compactMetadata(local)
+		// Retired history may exist only as Mats, without compatibility winners.
+		meta.Frontier.MaxTime = max(meta.Frontier.MaxTime, donor.latest.meta.Frontier.MaxTime)
 		authority := moveAuthority{Version: 4, AtSeq: o.meta.NextPart}
 		authority.Coarse, err = moveUnionWindows(ctx, prepared.index, current, name, policy.Config, local.Frontier.Order, now)
 		if err != nil {

@@ -544,23 +544,24 @@ func (f *Versions) slotAt(l int, s int64, o uint64) slotValue {
 	return best
 }
 
-// OpenSlot is OpenSlots for the single window w.
+// OpenSlot is ScanWindows for the single window w.
 func OpenSlot(c Config, a int, w int64, load func(l int, first, last int64, from uint64) ([]Record, error)) (Sample, bool, error) {
 	var out Sample
 	var found bool
-	err := OpenSlots(c, a, []int64{w}, func(l int, first, last int64, from uint64) ([]Version, error) {
+	err := ScanWindows(c, a, [][2]int64{{w, w + c.Archives[a].Step}}, func(l int, first, last int64, from uint64) ([]Version, error) {
 		rs, err := load(l, first, last, from)
 		out := make([]Version, len(rs))
 		for i, r := range rs {
 			out[i] = r.Version()
 		}
 		return out, err
-	}, func(_ int64, p Sample, ok bool) { out, found = p, ok })
+	}, func(p Sample) { out, found = p, true })
 	return out, found, err
 }
 
-// OpenSlots computes windows of coarse level a (at most one per physical slot)
-// from stored records by lazy descent and visits each, in the order given.
+// ScanWindows resolves aligned time ranges [start, end) of coarse level a
+// (at most one window per physical slot), visiting only occupied slots in
+// physical slot order. Empty windows require no allocation or evaluation.
 // load(l, first, last, from) returns every stored record version of level l
 // in physical slots [first, last) from the parts that may hold a batch order
 // >= from (from 0: every part). The read loads the windows' own slots first
@@ -573,7 +574,7 @@ func OpenSlot(c Config, a int, w int64, load func(l int, first, last int64, from
 // contiguous run of slots), and once more for the settle check. Every window
 // is computed by Versions, the function the seal and merges use, so the read
 // equals Versions over every version under the window (WindowRanges).
-func OpenSlots(c Config, a int, windows []int64, load func(l int, first, last int64, from uint64) ([]Version, error), visit func(w int64, p Sample, ok bool), timeFirst ...bool) error {
+func ScanWindows(c Config, a int, ranges [][2]int64, load func(l int, first, last int64, from uint64) ([]Version, error), visit func(p Sample), timeFirst ...bool) error {
 	// The descent tracks time spans still open, not windows: a long range
 	// has few spans but a huge number of finer windows.
 	type span struct{ lo, hi int64 }
@@ -613,15 +614,14 @@ func OpenSlots(c Config, a int, windows []int64, load func(l int, first, last in
 		}
 		return nil
 	}
-	step := c.Archives[a].Step
 	var open []span
-	for _, w := range slices.Sorted(slices.Values(windows)) {
-		if n := len(open); n > 0 && open[n-1].hi >= w {
-			open[n-1].hi = max(open[n-1].hi, w+step)
-			continue
+	for _, r := range ranges {
+		if r[0] < r[1] {
+			open = append(open, span{r[0], r[1]})
 		}
-		open = append(open, span{w, w + step})
 	}
+	slices.SortFunc(open, func(x, y span) int { return cmp.Compare(x.lo, y.lo) })
+	requested := open
 	var recs []Version
 	for l := a; l >= 0 && len(open) > 0; l-- {
 		al := c.Archives[l]
@@ -674,9 +674,17 @@ func OpenSlots(c Config, a int, windows []int64, load func(l int, first, last in
 		open = next
 	}
 	versions := NewVersions(c, recs, timeFirst...)
-	for _, w := range windows {
-		p, ok := versions.SlotValue(a, slot(w, c.Archives[a]))
-		visit(w, p, ok)
+	al := c.Archives[a]
+	for _, s := range slices.Sorted(maps.Keys(versions.wins[a])) {
+		for _, r := range requested {
+			w := r.lo + ((s-slot(r.lo, al)+al.Count)%al.Count)*al.Step
+			if w < r.hi {
+				if p, ok := versions.SlotValue(a, s); ok {
+					visit(p)
+				}
+				break
+			}
+		}
 	}
 	return nil
 }

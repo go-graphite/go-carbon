@@ -36,9 +36,16 @@ func moveUnionWindows(ctx context.Context, donor, receiver *RollupSnapshot, name
 				if side == 0 {
 					v.origin.Class = CopiedPart
 				}
+				// A prior attachment is still the donor stream. Counting it as
+				// receiver input would turn single-stream retired history into a
+				// mixed window whose missing raw can only yield a None marker.
+				stream := uint8(1 << side)
+				if v.origin.Class == CopiedPart {
+					stream = 1
+				}
 				for parent := max(1, archive); parent < len(c.Archives); parent++ {
 					step := c.Archives[parent].Step
-					sides[window{parent, r.Sample.Time - r.Sample.Time%step}] |= 1 << side
+					sides[window{parent, r.Sample.Time - r.Sample.Time%step}] |= stream
 				}
 				key := [2]int64{int64(archive), r.Slot}
 				if old, ok := viewRecords[key]; !ok {
@@ -57,15 +64,19 @@ func moveUnionWindows(ctx context.Context, donor, receiver *RollupSnapshot, name
 				}
 				for parent := 1; parent < len(c.Archives); parent++ {
 					step := c.Archives[parent].Step
-					rawSides[window{parent, r.Sample.Time - r.Sample.Time%step}] |= 1 << side
+					rawSides[window{parent, r.Sample.Time - r.Sample.Time%step}] |= stream
 				}
 			}
 			// A TTL Mat need not have a per-slot compatibility winner. Include its
 			// window in the mixed-window inventory without treating it as fine input.
 			if err := index.eachPartRecord(ctx, m, index.metricParts(m), archive, 0, a.Count, true, nil, func(r sealrollup.Record, origin partOrigin) error {
+				stream := uint8(1 << side)
+				if origin.Class == CopiedPart {
+					stream = 1
+				}
 				for parent := max(1, archive); parent < len(c.Archives); parent++ {
 					step := c.Archives[parent].Step
-					sides[window{parent, r.Sample.Time - r.Sample.Time%step}] |= 1 << side
+					sides[window{parent, r.Sample.Time - r.Sample.Time%step}] |= stream
 				}
 				// A receiver write-down is its own fallback even when no seal
 				// wrote a compatibility value. A donor-only scalar cannot repair
