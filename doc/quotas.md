@@ -49,6 +49,13 @@ If `carbonserver.quota-usage-report-frequency` is 5 minute, then `throughput = 6
 
 For `throughput` control, both new and old metrics might be dropped, depending their arriving order.
 
+Only rules with a positive `throughput` value track accepted points. Use
+`throughput = max` to report throughput usage without enforcing a finite limit.
+Omitted, zero, or negative values produce no throughput quota/usage series and
+add no per-point throughput accounting. Enabling throughput on such a rule
+starts a fresh usage window; changing between positive values (including `max`)
+preserves the current window.
+
 ## Special values
 
 The control values can be set to `max`/`maximum`, which is set to max int64 (9,223,372,036,854,775,807), and it practically means no limit.
@@ -137,8 +144,8 @@ Once quota support is enabled at startup, send `SIGHUP` to reload the quota file
 without restarting go-carbon. The existing index and listeners stay available.
 Rules are applied by the index updater; the log message `quota rules reloaded`
 confirms application. Changes do not reset throughput consumption for namespaces
-that remain configured. Removing a rule removes its limits, and an empty quota
-file clears all rules. Invalid files or glob patterns retain the previous rules.
+whose throughput control remains positive. Removing a rule removes its limits,
+and an empty quota file clears all rules. Invalid files or glob patterns retain the previous rules.
 Newly matched namespaces use their existing indexed storage usage immediately.
 Rule application does not wait for a disk scan. Quota/usage metrics still follow
 `carbonserver.quota-usage-report-frequency`, independently of the polling interval.

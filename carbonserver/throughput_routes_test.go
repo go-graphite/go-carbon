@@ -43,8 +43,12 @@ func TestThroughputRoutesMatchUncached(t *testing.T) {
 			for cycle := range 8 {
 				if cycle == 4 { // Reset counters while retaining every cached route.
 					for _, path := range []string{"/", "a", "a.b"} {
-						fast.throughputs.load(path).offset()
-						old.throughputs.load(path).offset()
+						if ns := fast.throughputs.load(path); ns != nil {
+							ns.offset()
+						}
+						if ns := old.throughputs.load(path); ns != nil {
+							ns.offset()
+						}
 					}
 				}
 				for _, name := range []string{"a.b.one", "a.c.two", "b.one", "a.one", "plain", "a.b", "a", ""} {
@@ -58,6 +62,9 @@ func TestThroughputRoutesMatchUncached(t *testing.T) {
 						}
 						for _, path := range []string{"/", "a", "a.b"} {
 							a, b := fast.throughputs.load(path), old.throughputs.load(path)
+							if a == nil && b == nil {
+								continue
+							}
 							if a.dpRecorder().total() != b.dpRecorder().total() || a.quotaUsage().Throttled != b.quotaUsage().Throttled {
 								t.Fatalf("%q accounting differs after %q", path, name)
 							}
