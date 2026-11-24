@@ -1,6 +1,7 @@
 package v2index
 
 import (
+	"container/heap"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -97,13 +98,13 @@ func (c *Catalog) SetDir(dir string) error {
 // replay folds logs c.seq, c.seq+1, ... into base as revision 1 and keeps
 // the last log open for appends, without its torn tail.
 func (c *Catalog) replay(base *Snapshot) (*Snapshot, error) {
-	live := map[string]bool{}
+	var runs logRuns
 	for ; ; c.seq++ {
 		data, err := os.ReadFile(c.logPath(c.seq))
 		if err != nil {
 			return nil, err
 		}
-		good, err := readLog(data, live)
+		good, err := readLog(data, &runs)
 		if err != nil {
 			return nil, err
 		}
@@ -121,12 +122,27 @@ func (c *Catalog) replay(base *Snapshot) (*Snapshot, error) {
 		}
 		break
 	}
+	// Merge the already sorted runs. For a repeated name, the newest run
+	// comes first, so only its final membership is applied to the base.
+	heap.Init(&runs)
 	var add, remove []string
-	for name, alive := range live {
-		if alive {
-			add = append(add, name)
+	last, first := "", true
+	for len(runs) > 0 {
+		r := &runs[0]
+		name := r.names[0]
+		if first || name != last {
+			if r.remove {
+				remove = append(remove, name)
+			} else {
+				add = append(add, name)
+			}
+			last, first = name, false
+		}
+		r.names = r.names[1:]
+		if len(r.names) == 0 {
+			heap.Pop(&runs)
 		} else {
-			remove = append(remove, name)
+			heap.Fix(&runs, 0)
 		}
 	}
 	s, _, _, err := c.apply(context.Background(), base, 1, add, remove)
@@ -136,9 +152,36 @@ func (c *Catalog) replay(base *Snapshot) (*Snapshot, error) {
 	return s, err
 }
 
-// readLog folds the whole records of a log into live (name -> listed) and
-// returns the bytes they span.
-func readLog(data []byte, live map[string]bool) (int, error) {
+// logRuns orders sorted name runs by their next name, newest publication
+// first on a tie. Removals follow additions within a record, so they win.
+type logRun struct {
+	names  []string
+	order  int
+	remove bool
+}
+type logRuns []logRun
+
+func (r logRuns) Len() int { return len(r) }
+func (r logRuns) Less(i, j int) bool {
+	a, b := r[i], r[j]
+	if a.names[0] == b.names[0] {
+		return a.order > b.order
+	}
+	return a.names[0] < b.names[0]
+}
+func (r logRuns) Swap(i, j int) { r[i], r[j] = r[j], r[i] }
+func (r *logRuns) Push(x any)   { *r = append(*r, x.(logRun)) }
+func (r *logRuns) Pop() any {
+	n := len(*r) - 1
+	out := (*r)[n]
+	(*r)[n] = logRun{}
+	*r = (*r)[:n]
+	return out
+}
+
+// readLog collects the sorted runs of whole records in publication order
+// and returns the bytes they span. A torn last record is ignored.
+func readLog(data []byte, runs *logRuns) (int, error) {
 	off := 0
 	for off+8 <= len(data) {
 		size := int(binary.LittleEndian.Uint32(data[off:]))
@@ -150,7 +193,8 @@ func readLog(data []byte, live map[string]bool) (int, error) {
 			return 0, bad
 		}
 		p := data[off+8 : off+8+size]
-		for _, listed := range []bool{true, false} {
+		for _, remove := range []bool{false, true} {
+			var names []string
 			n, k := binary.Uvarint(p)
 			if k <= 0 {
 				return 0, bad
@@ -175,10 +219,17 @@ func readLog(data []byte, live map[string]bool) (int, error) {
 				}
 				key = append(key[:shared], data[k:k+int(size)]...)
 				data = data[k+int(size):]
-				live[string(key)] = listed
+				name := string(key)
+				if len(names) > 0 && names[len(names)-1] >= name {
+					return 0, bad
+				}
+				names = append(names, name)
 			}
 			if len(data) != 0 {
 				return 0, bad
+			}
+			if len(names) > 0 {
+				*runs = append(*runs, logRun{names: names, order: len(*runs), remove: remove})
 			}
 		}
 		off += 8 + size
