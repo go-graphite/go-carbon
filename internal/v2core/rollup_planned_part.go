@@ -3,6 +3,7 @@ package v2core
 import (
 	"bytes"
 
+	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
@@ -18,7 +19,15 @@ func writePlannedRollupPart(path string, file []coreKV, spec v2part.Spec) (v2par
 	w.SealCompression()
 	var shards []uint16
 	var prefix []byte
-	for _, kv := range file {
+	next := 0
+	for i, kv := range file {
+		if i == next {
+			orders, n := sealOrderEncoding(len(file)-i, func(j int) (*sealrollup.Record, []byte) { return file[i+j].Record, file[i+j].Value }, spec.Source.Seq != 0)
+			next = i + n
+			if err = w.SetOrderEncoding(orders); err != nil {
+				return v2part.Descriptor{}, err
+			}
+		}
 		// Keys are sorted, so each routed shard occurs once. Decode only at
 		// shard boundaries; archive records need no extra name/route hashing.
 		if len(shards) == 0 || !bytes.HasPrefix(kv.Key, prefix) {
@@ -69,7 +78,15 @@ func writePlannedRollupTuples(path string, part plannedRollupPart) (v2part.Descr
 	}
 	var shards []uint16
 	for _, segment := range part.Segments {
+		next := 0
 		for i, kv := range segment {
+			if i == next {
+				orders, n := sealOrderEncoding(len(segment)-i, func(j int) (*sealrollup.Record, []byte) { return segment[i+j].record, segment[i+j].value }, part.Spec.Source.Seq != 0)
+				next = i + n
+				if err = w.SetOrderEncoding(orders); err != nil {
+					return v2part.Descriptor{}, err
+				}
+			}
 			if len(shards) == 0 || shards[len(shards)-1] != kv.vshard {
 				shards = append(shards, kv.vshard)
 			}
@@ -107,4 +124,31 @@ func writePlannedRollupTuples(path string, part plannedRollupPart) (v2part.Descr
 	}
 	d.VShards = shards
 	return d, d.Validate()
+}
+
+// Only the native planned-part handoff calls this selector, after the owner
+// assigns Seq. Copy/repack writers retain exact orders. The envelope terminates
+// the whole name, so uniqueness is checked across dense-run boundaries too.
+func sealOrderEncoding(n int, at func(int) (*sealrollup.Record, []byte), native bool) (v2part.OrderEncoding, int) {
+	unique := true
+	var prior *sealrollup.Record
+	for i := 0; i < n; i++ {
+		r, envelope := at(i)
+		if r == nil {
+			m, _, err := decodeRollupMetadataHeader(envelope)
+			policy, ok := v2part.ResolvePolicy(m.Frontier.Policy)
+			if native && unique && err == nil && ok && summaryPolicy(policy.Config, &m) {
+				return v2part.SummaryOrders, i + 1
+			}
+			return v2part.ExactOrders, i + 1
+		}
+		unique = unique && r.Kind == sealrollup.KindRaw && r.Upto == 0 && (prior == nil || mergeSlotLess(*prior, *r))
+		prior = r
+	}
+	return v2part.ExactOrders, n
+}
+
+// A single archive has no propagation history clock; legacy resets still do.
+func summaryPolicy(config sealrollup.Config, metadata *RollupMetadata) bool {
+	return len(config.Archives) == 1 && (metadata.Version >= 4 || metadata.ResetOrder == 0)
 }

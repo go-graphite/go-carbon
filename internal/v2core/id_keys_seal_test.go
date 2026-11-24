@@ -36,7 +36,7 @@ func TestIDKeyedSealDifferential(t *testing.T) {
 		names = raceNames
 	}
 	for method := sealrollup.Average; method <= sealrollup.First; method += 3 {
-		for _, schema := range []string{"1s:1h,1m:1d,1h:1y", "10s:6h,5m:7d,1h:1y,1d:10y"} {
+		for _, schema := range []string{"1s:1h", "1s:1h,1m:1d,1h:1y", "10s:6h,5m:7d,1h:1y,1d:10y"} {
 			t.Run(fmt.Sprintf("%d/%s", method, schema), func(t *testing.T) {
 				t.Parallel()
 				policies := make([][]byte, names)

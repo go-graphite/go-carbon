@@ -94,6 +94,7 @@ func TestSealHandoffByteDifferential(t *testing.T) {
 				for i, part := range plan.Parts {
 					// The owner's part workers stamp the durable source stream.
 					part.Spec.Source.Incarnation, part.Spec.Source.Stream = v2part.PartID{byte(seed)}, "handoff"
+					part.Spec.Source.Seq = uint64(seal + 1)
 					partSpecs[i].Source = part.Spec.Source
 					parts++
 					seen[part.Spec.Scope.Partition] = true
