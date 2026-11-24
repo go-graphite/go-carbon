@@ -167,3 +167,19 @@ func TestV2AdmissionLiveClassicValidation(t *testing.T) {
 		t.Fatalf("immutable inventory miss probed classic: %v", err)
 	}
 }
+
+func TestV2AdmissionPathBoundaryDifferential(t *testing.T) {
+	app := v2TestApp(t, t.TempDir())
+	app.Carbonserver = carbonserver.NewCarbonserverListener(nil)
+	app.Carbonserver.SetWhisperData(app.Config.Whisper.DataDir)
+	// Each component and the total metric name pass receiver name limits.
+	name := strings.Repeat("a.", 2040) + "x"
+	got, gotErr := app.v2PolicyResolver(v2Only, nil)(name)
+	want, wantErr := originalV2Policy(app, v2Only, name)
+	if wantErr == nil {
+		t.Fatal("classic full-path refusal missing")
+	}
+	if string(got) != string(want) || fmt.Sprint(gotErr) != fmt.Sprint(wantErr) {
+		t.Fatalf("len=%d: candidate=%v old=%v", len(name), gotErr, wantErr)
+	}
+}

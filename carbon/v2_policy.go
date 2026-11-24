@@ -10,6 +10,7 @@ import (
 	"github.com/go-graphite/go-carbon/internal/v2daemon"
 	"github.com/go-graphite/go-carbon/internal/v2part"
 	"github.com/go-graphite/go-carbon/internal/v2read"
+	"golang.org/x/sys/unix"
 )
 
 // classicNames is the sorted, immutable inventory returned by openV2Classic.
@@ -29,8 +30,9 @@ func (app *App) v2PolicyResolver(mode string, classicNames []string) v2daemon.Po
 		_, classic := slices.BinarySearch(classicNames, name)
 		// Only unambiguous classic names can use the inventory's absence proof.
 		// Slash/empty components may alias an inventoried file; NUL must retain
-		// the old path refusal. Live dual write can create names after startup.
-		ambiguous := strings.ContainsAny(name, "/\x00") || strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".") || strings.Contains(name, "..")
+		// the old path refusal, as must paths at the OS length limit. Live dual
+		// write can create names after startup.
+		ambiguous := strings.ContainsAny(name, "/\x00") || strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".") || strings.Contains(name, "..") || len(c.Whisper.DataDir)+len(name)+len("/.wsp") >= unix.PathMax
 		if mode != v2Shadow && (mode == v2ServingDual || classic || ambiguous) {
 			policy := v2read.Metric{AggregationMethod: agg.AggregationMethod().String(), XFilesFactor: cfg.XFilesFactor}
 			for _, archive := range cfg.Archives {
