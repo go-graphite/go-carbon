@@ -1,9 +1,11 @@
 package partlog
 
 import (
+	"bytes"
 	"encoding/binary"
 	"hash/crc32"
 	"sort"
+	"unsafe"
 
 	"github.com/klauspost/compress/zstd"
 )
@@ -109,7 +111,7 @@ func (c *NameCatalog) readGroup(body []byte) error {
 		if expandedBytes > catalogGroupLimit {
 			return errCatalog
 		}
-		key := previous[:int(prefix)] + string(suffix)
+		key := catalogGroupKey(previous, int(prefix), suffix, def, c.binding != nil)
 		if key == "" || (len(bindings) > 0 && key <= previous) {
 			return errCatalog
 		}
@@ -140,4 +142,19 @@ func (c *NameCatalog) readGroup(body []byte) error {
 		}
 	}
 	return nil
+}
+
+// Bound recovery only borrows names until Bind owns or validates each identity.
+// Ordinary canonical definitions already contain the full name: borrow those
+// immutable decoded bytes after checking both front-coded pieces. DecodeAll
+// gives each group its own backing array; Bind must own retained inputs. Other
+// definitions and unbound catalogs retain the ordinary owned-name path.
+func catalogGroupKey(previous string, prefix int, suffix, definition []byte, bound bool) string {
+	start := len(definitionNamePrefix)
+	end := start + prefix + len(suffix)
+	if bound && len(definition) > end && bytes.HasPrefix(definition, []byte(definitionNamePrefix)) && definition[end] == '"' &&
+		bytes.Equal(definition[start:start+prefix], []byte(previous[:prefix])) && bytes.Equal(definition[start+prefix:end], suffix) {
+		return unsafe.String(unsafe.SliceData(definition[start:end]), end-start)
+	}
+	return previous[:prefix] + string(suffix)
 }
