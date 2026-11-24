@@ -319,10 +319,6 @@ func TestSealedGCPublishedReplacementAndDiskBytes(t *testing.T) {
 	if err := g.retire(old, authorize); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := g.sweep(); err != nil || n != 0 {
-		t.Fatalf("grace: %d %v", n, err)
-	}
-	gcAdvance(g)
 	reclaimed, err := g.sweep()
 	if err != nil || reclaimed != before {
 		t.Fatalf("reclaimed=%d expected=%d: %v", reclaimed, before, err)

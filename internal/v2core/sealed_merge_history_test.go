@@ -118,6 +118,8 @@ func TestSealedMergeHistoryDifferential(t *testing.T) {
 					compare(epoch)
 					if epoch == 15 || epoch == 31 {
 						o := engines[1].owners[0]
+						priorGC := o.gc
+						removedBefore := priorGC.removedParts.Load()
 						if n := mergeDrain(t, o); n == 0 {
 							t.Fatal("no history parts merged")
 						}
@@ -131,7 +133,8 @@ func TestSealedMergeHistoryDifferential(t *testing.T) {
 						if _, err := o.gc.sweep(); err != nil {
 							t.Fatal(err)
 						}
-						if o.gc.removedParts.Load() == 0 {
+						// Released inputs may be reclaimed before close or after reopen.
+						if priorGC.removedParts.Load()-removedBefore+o.gc.removedParts.Load() == 0 {
 							t.Fatal("source parts not unlinked")
 						}
 						compare(epoch)

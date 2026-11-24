@@ -199,7 +199,9 @@ func (g *sealedPartGC) sweep() (uint64, error) {
 		if completed >= 64 {
 			break
 		}
-		if g.now().Sub(p.at) < g.grace || g.inventory.registry.held(id) || (snapshots.Count > 0 && p.sequence > 0 && snapshots.EarliestSeqNum <= p.sequence) {
+		// Runtime retirements have a synced sequence fence. Startup discoveries
+		// lack that fence and retain their grace for deterministic replay.
+		if (p.sequence == 0 && g.now().Sub(p.at) < g.grace) || g.inventory.registry.held(id) || (snapshots.Count > 0 && p.sequence > 0 && snapshots.EarliestSeqNum <= p.sequence) {
 			continue
 		}
 		_, closer, err := g.db.Get(partBinding(sealedPartPrefix, id))

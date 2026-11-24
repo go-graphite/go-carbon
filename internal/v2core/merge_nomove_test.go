@@ -24,7 +24,6 @@ func TestNoMoveMergePublication(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		pin.Close()
 		o.gc.mu.Lock()
 		pendingBefore := len(o.gc.pending)
 		o.gc.mu.Unlock()
@@ -37,7 +36,7 @@ func TestNoMoveMergePublication(t *testing.T) {
 		if len(selected) > 0 && !changed {
 			t.Fatal("ordinary merge proposal invalidated")
 		}
-		// Every selected input starts its ordinary grace in this publication.
+		// Every selected input gets this publication's synced retirement fence.
 		// No unselected proposal output may add another pending file.
 		o.gc.mu.Lock()
 		if got := len(o.gc.pending); got != pendingBefore+len(selected) {
@@ -58,6 +57,7 @@ func TestNoMoveMergePublication(t *testing.T) {
 			}
 		}
 		o.gc.mu.Unlock()
+		pin.Close()
 		if epoch := reflect.ValueOf(o.gc).Elem().FieldByName("moveEpoch"); epoch.IsValid() && epoch.Uint() != 0 {
 			t.Fatal("ordinary publication advanced attachment epoch")
 		}

@@ -218,6 +218,8 @@ func TestIDKeyedSealDifferential(t *testing.T) {
 					}
 					if epoch == 11 || epoch == 23 {
 						o := engines[1].owners[0]
+						priorGC := o.gc
+						removedBefore := priorGC.removedParts.Load()
 						if n := mergeDrain(t, o); n == 0 {
 							t.Fatal("no ID-keyed parts merged")
 						}
@@ -229,7 +231,8 @@ func TestIDKeyedSealDifferential(t *testing.T) {
 						if _, err := o.gc.sweep(); err != nil {
 							t.Fatal(err)
 						}
-						if o.gc.removedParts.Load() == 0 {
+						// Released inputs may be reclaimed before close or after reopen.
+						if priorGC.removedParts.Load()-removedBefore+o.gc.removedParts.Load() == 0 {
 							t.Fatal("source parts not unlinked")
 						}
 						compare(epoch)
