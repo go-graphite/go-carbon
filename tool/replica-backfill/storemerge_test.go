@@ -151,6 +151,15 @@ func TestStoreMergesBackfill(t *testing.T) {
 }
 
 func checkStoreMerge(t *testing.T, c mergeCase, newerCached bool) {
+	checkStoreMergeSource(t, c, newerCached, false)
+}
+
+func TestStoreMergesDumpBackfill(t *testing.T) {
+	t.Parallel()
+	checkStoreMergeSource(t, mergeCase{timeBuckets: true, outOfOrder: true}, true, true)
+}
+
+func checkStoreMergeSource(t *testing.T, c mergeCase, newerCached, dump bool) {
 	app := startStoreApp(t, c)
 	local := "http://" + app.Carbonserver.HTTPListener().Addr().String()
 	var ingest string
@@ -223,8 +232,12 @@ func checkStoreMerge(t *testing.T, c mergeCase, newerCached bool) {
 	for ts := T - 60*60; ts <= newest; ts += mergeStep {
 		replica.set(mergeMetric, ts, mergeValue(ts))
 	}
+	var dumpPath string
+	if dump {
+		dumpPath = dumpFixture(t, []dumpRow{sourceRow(mergeMetric, mergeStep, 8640, replica.data[mergeMetric])}, true)
+	}
 	opts := func(dry bool) *options {
-		return &options{
+		o := &options{
 			local: local, ingest: ingest,
 			replicas: urlList{replica.srv.URL},
 			from:     strconv.FormatInt(T-30*60, 10), until: strconv.FormatInt(T, 10),
@@ -232,6 +245,11 @@ func checkStoreMerge(t *testing.T, c mergeCase, newerCached bool) {
 			timeout: 10 * time.Second, retries: 2, backoff: 10 * time.Millisecond, maxBack: 100 * time.Millisecond,
 			flushPt: 1000, writeRetries: 3, dryRun: dry,
 		}
+		if dump {
+			o.replicas = nil
+			o.sourceDumps = dumpPaths{dumpPath}
+		}
+		return o
 	}
 	waitFor(t, "metric indexed", func() bool {
 		names, err := newClient(local, opts(true), nil).list(context.Background())

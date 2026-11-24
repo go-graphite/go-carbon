@@ -48,6 +48,7 @@ type clientStats struct {
 
 // client talks to one carbonserver (/render multi-fetch and /metrics/list).
 type client struct {
+	dump       *dumpSource // optional offline source; HTTP remains the local reader
 	base       string
 	http       *http.Client
 	limiter    *rate.Limiter // shared by all replicas; nil means unlimited
