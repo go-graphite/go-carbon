@@ -84,6 +84,7 @@ func (s *Store) prepareContinuationUpdate(ctx context.Context, batch *pebble.Bat
 		return m, nil, nil, false, err
 	}
 	io.mutationTracked = history.Version == 1
+	s.recordProofWrite(io.mutationTracked)
 	for _, scope := range history.Scopes {
 		io.mutationWindows = append(io.mutationWindows, MutationRange{From: scope.From, Until: scope.Until})
 	}

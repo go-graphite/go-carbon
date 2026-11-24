@@ -98,6 +98,9 @@ func (s *Store) stageMutationHistory(b *pebble.Batch, m Metadata, ranges []Mutat
 	if err != nil {
 		return err
 	}
+	if !m.Continuation {
+		s.recordProofWrite(h.Version == 1)
+	}
 	if h.Version == 0 {
 		return nil
 	}
@@ -223,6 +226,9 @@ func (s *Store) MutationProof(ctx context.Context, name string, from, until int6
 					unlock()
 					return "", "", e
 				}
+			}
+			if !exists {
+				s.proofCounters.registered.Add(1)
 			}
 		}
 		unlock()

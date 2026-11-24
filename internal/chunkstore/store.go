@@ -252,6 +252,7 @@ type Store struct {
 	readParents           [32]context.Context
 	readParentNext        atomic.Uint64
 	nativeCounters        nativeCounters
+	proofCounters         proofCounters
 	nativeReady           func() error // installed before listeners; native/shared ownership only
 	nativePendingSnapshot func() (map[string]struct{}, error)
 	nativePendingCheck    func(string) bool
@@ -1340,6 +1341,7 @@ type CompactionKinds struct {
 }
 
 type Stats struct {
+	Proof                                                   ProofStats
 	BlockLoadCapacity, BlockLoadsInProgress, BlockLoadWaits int64
 	ReadCapacity, ReadsInProgress, ReadsQueued              int64
 
@@ -1486,6 +1488,7 @@ func (s *Store) statsFrom(m *pebble.Metrics, pacing compactionPacingStats, cold 
 	stats.IngestTables, stats.IngestEntries, stats.IngestBytes = s.ingestStats.tables.Load(), s.ingestStats.entries.Load(), s.ingestStats.bytes.Load()
 	stats.IngestL0Bytes, stats.IngestMemtableOverlaps = s.ingestStats.l0Bytes.Load(), s.ingestStats.memtableOverlaps.Load()
 	stats.TransferBatchCommits, stats.TransferBatchEntries, stats.TransferBatchBytes = s.transferBatchStats.commits.Load(), s.transferBatchStats.entries.Load(), s.transferBatchStats.bytes.Load()
+	stats.Proof = s.ProofStats()
 	stats.TransferMergeAppended, stats.TransferMergeAppendedClassic, stats.TransferMergeFallbacks = s.transferMergeStats.snapshot()
 	stats.ContinuationRangeDeletes = continuationRangeDeletes.Load()
 	stats.CompactionKinds = CompactionKinds{Default: uint64(m.Compact.DefaultCount), DeleteOnly: uint64(m.Compact.DeleteOnlyCount), ElisionOnly: uint64(m.Compact.ElisionOnlyCount),

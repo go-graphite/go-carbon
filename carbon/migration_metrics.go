@@ -74,6 +74,7 @@ type migrationSnapshot struct {
 }
 
 type storeStatsView struct {
+	proof                                                                   store.ProofStats
 	blockLoadCapacity, blockLoadsInProgress, blockLoadWaits                 int64
 	readCapacity, readsInProgress, readsQueued                              int64
 	coldPack                                                                store.ColdPackStats
@@ -191,6 +192,12 @@ var migrationMetricSpecs = func() []metricSpec {
 		counter("pebble_transfer_batch_commits_total", "Imported transfers committed as one batch instead of ingested tables.", func(s *migrationSnapshot) float64 { return float64(s.stats.transferBatchCommits) }),
 		counter("pebble_transfer_batch_entries_total", "Metrics imported through batch-committed transfers.", func(s *migrationSnapshot) float64 { return float64(s.stats.transferBatchEntries) }),
 		counter("pebble_transfer_batch_bytes_total", "Bytes of batch-committed transfers.", func(s *migrationSnapshot) float64 { return float64(s.stats.transferBatchBytes) }),
+		counter("pebble_mutation_proof_tracked_writes_total", "Mutation proof tracked writes, since process start.", func(s *migrationSnapshot) float64 { return float64(s.stats.proof.TrackedWrites) }),
+		counter("pebble_mutation_proof_untracked_writes_total", "Mutation proof untracked writes, since process start.", func(s *migrationSnapshot) float64 { return float64(s.stats.proof.UntrackedWrites) }),
+		counter("pebble_mutation_proof_scopes_registered_total", "Mutation proof scopes registered, since process start.", func(s *migrationSnapshot) float64 { return float64(s.stats.proof.Registered) }),
+		counter("pebble_mutation_proof_scopes_released_total", "Mutation proof scopes released, since process start.", func(s *migrationSnapshot) float64 { return float64(s.stats.proof.Released) }),
+		counter("pebble_mutation_proof_resets_total", "Mutation proof resets, since process start.", func(s *migrationSnapshot) float64 { return float64(s.stats.proof.Resets) }),
+		counter("pebble_mutation_proof_release_errors_total", "Mutation proof release errors, since process start.", func(s *migrationSnapshot) float64 { return float64(s.stats.proof.Errors) }),
 		counter("pebble_transfer_merge_appended_total", "Imported names already on this store merged by appending its newer points to the copy, without re-encoding the copy's history.", func(s *migrationSnapshot) float64 { return float64(s.stats.transferMergeAppended) }),
 		counter("pebble_transfer_merge_appended_classic_total", "Of pebble_transfer_merge_appended_total, names merged into a classic (uncompressed) source or target by writing only the ring slots that differ.", func(s *migrationSnapshot) float64 { return float64(s.stats.transferMergeAppendedClassic) }),
 		counter("pebble_flush_bytes_total", "Bytes written by memtable flushes.", func(s *migrationSnapshot) float64 { return float64(s.stats.flushBytes) }),
@@ -721,7 +728,7 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		s.store = true
 		s.storeSnapshotAge = db.TelemetryAge().Seconds()
 		s.sidecars = sidecars
-		s.stats = storeStatsView{coldPack: st.ColdPack, thaws: whisperio.ColdPackThaws(), classicReanchors: whisperio.ClassicReanchors(), classicReanchorPace: c.app.reanchorPacer.Stats(),
+		s.stats = storeStatsView{proof: st.Proof, coldPack: st.ColdPack, thaws: whisperio.ColdPackThaws(), classicReanchors: whisperio.ClassicReanchors(), classicReanchorPace: c.app.reanchorPacer.Stats(),
 			ingestTables: st.IngestTables, ingestEntries: st.IngestEntries, ingestBytes: st.IngestBytes,
 			ingestL0Bytes: st.IngestL0Bytes, ingestOverlaps: st.IngestMemtableOverlaps,
 			transferBatchCommits: st.TransferBatchCommits, transferBatchEntries: st.TransferBatchEntries, transferBatchBytes: st.TransferBatchBytes,

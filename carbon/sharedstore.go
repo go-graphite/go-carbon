@@ -474,6 +474,12 @@ func (s *storeStats) Stat(send helper.StatCallback) {
 	send("tableCacheEntries", float64(stats.TableCacheEntries))
 	send("tableCacheHits", float64(stats.TableCacheHits-s.prev.TableCacheHits))
 	send("tableCacheMisses", float64(stats.TableCacheMisses-s.prev.TableCacheMisses))
+	send("mutationProofTrackedWrites", float64(stats.Proof.TrackedWrites-s.prev.Proof.TrackedWrites))
+	send("mutationProofUntrackedWrites", float64(stats.Proof.UntrackedWrites-s.prev.Proof.UntrackedWrites))
+	send("mutationProofRegistered", float64(stats.Proof.Registered-s.prev.Proof.Registered))
+	send("mutationProofReleased", float64(stats.Proof.Released-s.prev.Proof.Released))
+	send("mutationProofResets", float64(stats.Proof.Resets-s.prev.Proof.Resets))
+	send("mutationProofErrors", float64(stats.Proof.Errors-s.prev.Proof.Errors))
 	s.prev = stats
 }
 

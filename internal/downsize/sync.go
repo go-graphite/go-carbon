@@ -86,6 +86,7 @@ type syncBackend interface {
 type syncOptions struct {
 	issues           *syncIssues
 	noCopy, noVerify bool
+	noReleaseProofs  bool
 	restartWindow    bool // known restart: prior history is already proven
 	verifyStreams    int
 	policy           *effectiveSyncPolicy

@@ -88,3 +88,96 @@ completion, uncertain relay batches, catalog membership or missing late points.
 READY restart-gap recovery remains conservative until those independent fences
 and affected name/timestamp ranges are implemented. Do not infer a safe input
 gap from process wall-clock downtime or from a zero backlog gauge.
+
+## Explicit retirement
+
+Scopes persist until explicitly retired; they have no TTL. A restart does not
+retire them. Their normal lifecycle is registration during verification, tracked
+writes while verification is active, then release at terminal sync closeout.
+
+`storectl sync` releases proof scopes on the target and every donor after the
+final comparison and, when requested, READY publication. It first durably writes
+`proof-closeout.json`, then streams each participating catalogue in pages of at
+most 1000 names, saving a separate byte cursor for each holder after its reply.
+Independent READY and recovery catalogues retain their own holder sets. Separately
+selected child scopes own their own closeout. State and catalogues remain on disk;
+remove them only after cleanup succeeds. There is no release at copy completion,
+between rounds, on cancellation, on residual failure, or merely on process exit.
+A terminal `READY_EXCEPT` retains that verdict and its exclusion provenance.
+
+An interrupted cleanup resumes with the same `--resume STATE` command. This
+cleanup-only invocation finishes the already recorded historical closeout; it
+neither republishes READY nor refreshes saved proof tokens. A subsequent normal
+pass uses the existing frontier comparison and revalidates changed tokens. A
+reply lost before the cursor is saved can cause an idempotent retry. Successfully
+checkpointed pages are skipped. `--no-release-proofs` opts out, for example when
+coordinating overlapping verification or communicating with an older server.
+
+Release is conservative for other proof consumers: there are no scope owners or
+leases, and releasing one name can invalidate another consumer's proof reuse.
+Sync releases all scopes on its catalogued names. Coordinate overlapping jobs or
+use the opt-out to retain their scopes until every consumer has finished.
+
+### Maintenance API
+
+Both operations require a configured JWT secret and an authenticated token with
+explicit namespace `*` and operation `update` (or `*`). They are fenced against
+whole-store copy and use `POST /v1/maintenance/mutation-proofs`:
+
+```text
+POST /v1/maintenance/mutation-proofs?action=release
+X-Buckyd-Authorization: <JWT>
+{"Names":[{"Name":"example.metric","ID":42,"Generation":3,"From":1700000000,"Until":1700000600}]}
+
+POST /v1/maintenance/mutation-proofs?action=reset
+X-Buckyd-Authorization: <JWT>
+{}
+```
+
+Release accepts 1–1000 entries within a 32 MiB JSON body. Omit both `ID` and `Generation` to select the
+current generation; otherwise both must match. Omit both bounds to release all
+scopes, or supply one exact positive `[From,Until)` window. Overlap alone does not
+match. Results preserve request order and contain `Name`, `Status` (`released`,
+`absent`, `conflict`, `error`), `Released`, and optional `Error`. HTTP 200 can
+contain per-name errors: callers must inspect every result. Each page uses one
+synced atomic batch. Repeated release of absent scopes is harmless. The last
+scope's removal deletes the entire history key, including an empty Version=1
+record; leaving that record would keep mutation tracking enabled.
+
+Reset returns `{"Finished":"<UTC timestamp>"}` after a synced range tombstone
+covering exactly `proof/ranges/`. No keys are scanned, so no record count is
+reported. It locks every metric stripe and drains pending import/update
+reservations before deleting. Registration uses those same locks. An update
+staged before the fence must commit and publish first; it cannot restore its old
+history after reset. New stages and registrations start after the tombstone.
+Only proof history changes: points, native and transfer receipts, deletion fences,
+storage identity and proof-lineage files remain intact.
+
+With no history, proof comparison uses the current whole-metric revision until a
+new scope is registered. Every committed mutation advances that revision, so an
+in-window change during an untracked interval cannot reuse an older clean token.
+No saved history is ever restored. Missing or unusable metadata remains on the
+conservative revision/unknown path. Future verification re-registers scopes;
+retirement needs no data rollback.
+
+### Counters
+
+Prometheus exposes cumulative process counters:
+
+- `pebble_mutation_proof_tracked_writes_total`
+- `pebble_mutation_proof_untracked_writes_total`
+- `pebble_mutation_proof_scopes_registered_total`
+- `pebble_mutation_proof_scopes_released_total`
+- `pebble_mutation_proof_resets_total`
+- `pebble_mutation_proof_release_errors_total`
+
+Write counters count continuation update preparations (including no-ops or later
+failed attempts) and changed non-continuation updates, classified by the history
+seen under their mutation reservation. Scope counters count newly registered and
+explicitly released scopes, not a durable inventory. Reset does not enumerate
+released scopes. Release-error counts include generation conflicts and store
+release/reset errors; HTTP admission failures are logged separately. Errors are
+logged by buckyd and the client and leave cleanup state available for retry.
+Graphite's `storage` module reports deltas as `mutationProofTrackedWrites`,
+`mutationProofUntrackedWrites`, `mutationProofRegistered`, `mutationProofReleased`,
+`mutationProofResets`, and `mutationProofErrors`.
