@@ -46,13 +46,16 @@ func (s *continuationScratch) block() *store.PointBlock {
 // manifest and owns its header; allocation pages become owned on first change.
 // This is separate from the store's revision-fenced writer-state cache.
 type continuationUpdateState struct {
-	scratch *continuationScratch
-	entries map[string]*continuationFileData
-	bytes   int
+	scratch        *continuationScratch
+	reuseManifests bool
+	entries        map[string]*continuationFileData
+	bytes          int
 }
 
 func (c *continuationUpdateState) decode(encoded []byte) (*continuationFileData, error) {
-	if c == nil {
+	// Single-open updates need no immutable template or manifest key copy.
+	// Proof and sum-cache processing enable reuse before their repeated opens.
+	if c == nil || !c.reuseManifests {
 		return decodeContinuationManifest(encoded)
 	}
 	d := c.entries[string(encoded)]

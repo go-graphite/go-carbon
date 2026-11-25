@@ -264,7 +264,7 @@ func TestContinuationManifestReuseOwnsMutations(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			cache := new(continuationUpdateState)
+			cache := &continuationUpdateState{reuseManifests: true}
 			a, err := cache.decode(encoded)
 			if err != nil {
 				t.Fatal(err)

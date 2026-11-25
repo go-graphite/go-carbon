@@ -28,6 +28,9 @@ func (c *ContinuationCodec) updateWithMutationProof(ctx context.Context, kv stor
 	if baseline == nil {
 		return c.updateWithSumCache(ctx, kv, m, input, retention, clock, maintenance)
 	}
+	if c.updateState != nil {
+		c.updateState.reuseManifests = true
+	}
 	before, err := readSumWriteView(baseline, clock, c.updateState)
 	if err != nil {
 		return err

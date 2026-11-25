@@ -18,6 +18,14 @@ import (
 // timed=true wraps each update as the persister does: the update's total is
 // recorded and one in stagetime.SampleEvery times its stages.
 func BenchmarkContinuationUpdatePath(b *testing.B) {
+	benchmarkContinuationUpdatePath(b, false)
+}
+
+func BenchmarkContinuationUpdatePathReference(b *testing.B) {
+	benchmarkContinuationUpdatePath(b, true)
+}
+
+func benchmarkContinuationUpdatePath(b *testing.B, keepAllocations bool) {
 	for _, run := range []struct{ buckets, timed bool }{{false, false}, {false, true}, {true, false}, {true, true}} {
 		buckets, timed := run.buckets, run.timed
 		b.Run(fmt.Sprintf("buckets=%v/timed=%v", buckets, timed), func(b *testing.B) {
@@ -25,7 +33,7 @@ func BenchmarkContinuationUpdatePath(b *testing.B) {
 			ctx := context.Background()
 			base := int64(1_700_000_000)
 			now := time.Unix(base, 0)
-			db, err := store.Open(filepath.Join(b.TempDir(), "shared"), store.Options{ExactBlocks: true, Continuation: &ContinuationCodec{},
+			db, err := store.Open(filepath.Join(b.TempDir(), "shared"), store.Options{ExactBlocks: true, Continuation: &ContinuationCodec{keepUpdateAllocations: keepAllocations},
 				TimeBuckets: buckets, Now: func() time.Time { return now }, SyncInterval: time.Hour, CacheSize: 64 << 20, MemTableSize: 16 << 20})
 			if err != nil {
 				b.Fatal(err)

@@ -231,6 +231,9 @@ func (c *ContinuationCodec) updateWithSumCache(ctx context.Context, kv store.Con
 		}
 		return kv.DeletePrefix(sumRevisionKey)
 	}
+	if c.updateState != nil {
+		c.updateState.reuseManifests = true
+	}
 	before, err := readSumWriteView(kv, clock, c.updateState)
 	if err != nil {
 		return err
