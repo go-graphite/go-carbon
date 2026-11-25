@@ -98,6 +98,7 @@ type Cache struct {
 		invalidTagPoints    atomic.Uint64
 		xlogFailedPoints    atomic.Uint64
 		nameTooLong         atomic.Uint64 // points refused because the name exceeds points.MaxMetricNameBytes
+		divertThrottled     atomic.Uint64
 
 		droppedRealtimeIndex uint32 // new metrics failed to be indexed in realtime
 	}
@@ -113,6 +114,7 @@ type Cache struct {
 	restartEnd       func()
 
 	throttleWithHash func(ps *points.Points, inCache bool, hash uint64, state *any) bool
+	creationThrottle func(ps *points.Points, inCache bool) bool
 }
 
 type indexFilter struct {
@@ -819,12 +821,6 @@ func (c *Cache) addWithRestoreHashed(p *points.Points, restored, recovered, imme
 		return nil
 	}
 
-	if s.xlog != nil {
-		c.recordUnshardedInput(p, restored || recovered)
-		c.divert(s.xlog, p)
-		return nil
-	}
-
 	if s.tagsEnabled {
 		var err error
 		p.Metric, err = tags.Normalize(p.Metric)
@@ -834,6 +830,14 @@ func (c *Cache) addWithRestoreHashed(p *points.Points, restored, recovered, imme
 			c.stat.invalidTagPoints.Add(uint64(len(p.Data)))
 			return nil
 		}
+	}
+
+	if s.xlog != nil {
+		c.recordUnshardedInput(p, restored || recovered)
+		checkCreation := !restored && !recovered || source != nil && source.captured
+		inCache := checkCreation && c.creationThrottle != nil && c.Has(p.Metric)
+		c.divert(s.xlog, p, checkCreation, inCache)
+		return nil
 	}
 
 	// Get map shard.
@@ -861,7 +865,8 @@ func (c *Cache) addWithRestoreHashed(p *points.Points, restored, recovered, imme
 	// behind the shard dump. Recheck under the same lock so it cannot miss both
 	// the dump and the input log.
 	if current := c.settings.Load().(*cacheSettings); current.xlog != nil {
-		c.divert(current.xlog, p)
+		checkCreation := !restored && !recovered || source != nil && source.captured
+		c.divert(current.xlog, p, checkCreation, shard.items.getHashed(hash, p.Metric) != nil)
 		return nil
 	}
 	if !recovered {
@@ -903,6 +908,13 @@ func (c *Cache) addWithRestoreHashed(p *points.Points, restored, recovered, imme
 	}
 	var throttleState any
 	liveAdmission := !recovered && (!restored || !immediate)
+	// Capture files contain raw input, unlike the post-admission journal.
+	// Durability must not exempt a previously unseen name from storage quotas.
+	// Keep recovery's capacity/source tracking and avoid charging throughput again.
+	if recovered && source != nil && source.captured && c.creationThrottle != nil && c.creationThrottle(p, exists) {
+		shard.throttledPoints.Store(shard.throttledPoints.Load() + uint64(len(p.Data)))
+		return nil
+	}
 	if liveAdmission && c.throttleWithHash != nil {
 		if exists {
 			shard.throttleScratch = values.throttleState()

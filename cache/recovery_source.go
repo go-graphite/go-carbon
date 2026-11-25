@@ -14,11 +14,28 @@ type RecoverySource struct {
 	stream   *RecoveryStream
 	sequence uint64
 	journal  bool
+	captured bool
 	pending  atomic.Int64
 }
 
 func (s *RecoveryStream) Next() *RecoverySource {
 	return &RecoverySource{stream: s, sequence: s.next.Add(1)}
+}
+
+// NextCaptured identifies raw input buffered before quota admission. Replaying
+// it must enforce creation limits even though the source is already durable.
+func (s *RecoveryStream) NextCaptured() *RecoverySource {
+	source := s.Next()
+	source.captured = true
+	return source
+}
+
+// SetCreationThrottle checks storage limits for diverted live input and raw
+// capture replay. Accepted checkpoint/journal history remains exempt. Configure
+// before starting receivers, like SetThrottleWithHash. The callback must be
+// safe both with and without a cache shard lock and must not reenter the cache.
+func (c *Cache) SetCreationThrottle(throttle func(*points.Points, bool) bool) {
+	c.creationThrottle = throttle
 }
 
 // NextJournal identifies records whose durable authority is the continuous
@@ -66,8 +83,8 @@ func (r recoverySourceRefs) each(visit func(*RecoverySource)) {
 }
 
 // AddCapturedFrom keeps the normal batching clock for an owner already at
-// its live frontier. Its record is already durable; shared admission has
-// reserved capacity, so applying live drop quotas again would lose that record.
+// its live frontier. Capacity is already reserved and its source stays durable;
+// a raw capture source still checks creation quotas before entering the cache.
 func (c *Cache) AddCapturedFrom(p *points.Points, source *RecoverySource) {
 	c.addWithRestore(p, false, true, false, nil, source)
 }

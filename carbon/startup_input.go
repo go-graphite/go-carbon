@@ -370,7 +370,7 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 		}
 		tail := s.legacy.current.Load()
 		if tail.source == nil {
-			tail.source = s.legacy.stream.Next()
+			tail.source = s.legacy.stream.NextCaptured()
 		}
 		add := func(source *cache.RecoverySource) func(*points.Points) {
 			return func(p *points.Points) {
@@ -406,7 +406,7 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 			if path == s.path {
 				seg := s.legacy.current.Load()
 				if seg.source == nil {
-					seg.source = s.legacy.stream.Next()
+					seg.source = s.legacy.stream.NextCaptured()
 				}
 				return seg, nil
 			}
@@ -426,7 +426,7 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 				unlock()
 				return nil, e
 			}
-			seg := &startupSegment{file: f, path: path, unlock: unlock, source: s.legacy.stream.Next()}
+			seg := &startupSegment{file: f, path: path, unlock: unlock, source: s.legacy.stream.NextCaptured()}
 			zapwriter.Logger("app").Info("historical input tail opened", zap.String("filename", path), zap.Duration("lock_wait", time.Since(started)))
 			seg.size.Store(info.Size())
 			s.historyPendingBytes.Add(info.Size() - sizes[path])

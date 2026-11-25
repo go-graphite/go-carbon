@@ -17,7 +17,8 @@ type AdmissionStats struct {
 
 func (c *Cache) AdmissionStats() AdmissionStats {
 	s := AdmissionStats{
-		Received: c.stat.receivedPoints.Load(), Recovered: c.stat.recoveredPoints.Load(),
+		Throttled: c.stat.divertThrottled.Load(),
+		Received:  c.stat.receivedPoints.Load(), Recovered: c.stat.recoveredPoints.Load(),
 		XlogDiverted: c.stat.xlogDivertedPoints.Load(),
 		InvalidTags:  c.stat.invalidTagPoints.Load(), XlogWriteFailed: c.stat.xlogFailedPoints.Load(),
 	}
@@ -41,7 +42,11 @@ func (c *Cache) AdmissionStats() AdmissionStats {
 // divert keeps a failed diversion distinct from successful handoff buffering.
 // A failed write may have written a prefix; count all affected points rather
 // than claiming that none of the batch reached the diversion destination.
-func (c *Cache) divert(write func(*points.Points) error, p *points.Points) {
+func (c *Cache) divert(write func(*points.Points) error, p *points.Points, checkCreation, inCache bool) {
+	if checkCreation && c.creationThrottle != nil && c.creationThrottle(p, inCache) {
+		c.stat.divertThrottled.Add(uint64(len(p.Data)))
+		return
+	}
 	if err := write(p); err != nil {
 		c.stat.xlogFailedPoints.Add(uint64(len(p.Data)))
 	} else {
