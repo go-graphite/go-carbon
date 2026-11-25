@@ -112,7 +112,7 @@ func (s *Store) prepareContinuationUpdate(ctx context.Context, batch *pebble.Bat
 		if m.Revision == math.MaxUint64 {
 			return m, nil, nil, false, errors.New("metric revision exhausted")
 		}
-		if err := s.stageMutationHistory(batch, m, io.mutationRanges, io.mutationComplete, expiry); err != nil {
+		if err := stageMutationHistoryFrom(batch, m, history, io.mutationRanges, io.mutationComplete); err != nil {
 			return m, nil, nil, false, err
 		}
 		m.Revision++

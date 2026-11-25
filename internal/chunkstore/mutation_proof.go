@@ -164,6 +164,12 @@ func (s *Store) stageMutationHistory(b *pebble.Batch, m Metadata, ranges []Mutat
 	if !m.Continuation {
 		s.recordProofWrite(h.Version == 1)
 	}
+	return stageMutationHistoryFrom(b, m, h, ranges, complete)
+}
+
+// The caller may reuse history read under the same metric mutation reservation.
+// No codec writes this key; points, proof history and revision commit atomically.
+func stageMutationHistoryFrom(b *pebble.Batch, m Metadata, h mutationHistory, ranges []MutationRange, complete bool) error {
 	if h.Version == 0 {
 		return nil
 	}
@@ -340,6 +346,17 @@ func (io *continuationIO) MutationBaseline() (ContinuationIO, func()) {
 		return nil, func() {}
 	}
 	base := io.store.newContinuationIO(io.ctx, io.store.db, nil, io.metric)
+	// Reuse only immutable committed state for this reserved metric revision.
+	// A separate view keeps baseline reads independent of writer changes.
+	// A nonempty batch may contain earlier updates to this name, while the
+	// baseline reader still sees the committed DB. Keep that path uncached.
+	// The codec still opens and validates the cached header bytes.
+	if io.state != nil && io.batch != nil && io.batch.Count() == 0 {
+		st := io.state.base
+		if st != nil && st.meta.ID == io.metric.ID && st.meta.Generation == io.metric.Generation && st.meta.Revision == io.metric.Revision {
+			base.state = io.store.newStateView(st, io.metric)
+		}
+	}
 	return base, func() { _ = base.Close() }
 }
 func (io *continuationIO) RecordMutation(archive int, from, until int64) {
