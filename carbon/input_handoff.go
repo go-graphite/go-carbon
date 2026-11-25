@@ -361,15 +361,17 @@ func (app *App) loadInputTails(core *cache.Cache) error {
 				return err
 			}
 		}
+		var stream cache.RecoveryStream
+		source := stream.NextCaptured()
 		admit := func(p *points.Points) {
-			// These points were accepted before the checkpoint. Never apply
-			// live quotas again or discard them because recovery filled cache.
+			// Tails contain input received after the checkpoint, including raw
+			// input from older writers that diverted before quota admission.
 			// Reserve space before admitting another record; a single metric
 			// and its checkpoint history may exceed the configured limit.
 			for !core.HasRecoveryCapacity(len(p.Data)) {
 				time.Sleep(time.Millisecond)
 			}
-			core.AddRecovered(p)
+			core.AddRecoveredFrom(p, source)
 		}
 		var count int
 		if recovery.IsCaptureSegment(name) {

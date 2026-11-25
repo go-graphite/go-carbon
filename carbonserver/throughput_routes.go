@@ -78,7 +78,7 @@ func (listener *CarbonserverListener) ShouldThrottleMetricWithState(ps *points.P
 func (listener *CarbonserverListener) ShouldThrottleMetricWithHash(ps *points.Points, inCache bool, hash uint64, state *any) bool {
 	idx := listener.CurrentFileIndex()
 	if idx == nil || idx.trieIdx == nil {
-		return false
+		return listener.isQuotaEnabled()
 	}
 	ti := idx.trieIdx
 	var routes *throughputRoutes

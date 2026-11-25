@@ -1584,6 +1584,7 @@ func (app *App) listenCarbonserver(core *cache.Cache, newMetricsQueue *helper.Me
 		// Start the filesystem scan only after restored files have been written.
 		if app.Config.Whisper.Quotas != nil {
 			core.SetThrottleWithHash(cs.ShouldThrottleMetricWithHash)
+			core.SetCreationThrottle(cs.ShouldThrottleCreation)
 		}
 		if conf.Carbonserver.CacheScan {
 			core.InitCacheScanAdds()
@@ -1591,6 +1592,9 @@ func (app *App) listenCarbonserver(core *cache.Cache, newMetricsQueue *helper.Me
 		core.SetNewMetricsQueue(newMetricsQueue)
 		core.SetMetricExists(cs.MetricExists)
 		if err = cs.Listen(conf.Carbonserver.Listen); err != nil {
+			return
+		}
+		if err = cs.WaitForQuotaIndex(); err != nil {
 			return
 		}
 		if conf.Carbonserver.Grpc.Enabled {

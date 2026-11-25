@@ -305,6 +305,8 @@ type CarbonserverListener struct {
 	scanTicker        *time.Ticker
 	forceScanChan     chan struct{}
 	indexWarmupDone   chan struct{}
+	quotaIndexReady   chan struct{}
+	quotaIndexOnce    sync.Once
 	indexWarmupOnce   sync.Once
 	indexWorkers      sync.WaitGroup
 	stopOnce          sync.Once
@@ -617,6 +619,7 @@ func NewCarbonserverListener(cacheGetFunc func(key string) []points.Point) *Carb
 	return &CarbonserverListener{
 		// Config variables
 		metrics:           &metricStruct{},
+		quotaIndexReady:   make(chan struct{}),
 		exitChan:          make(chan struct{}),
 		metricsAsCounters: false,
 		cacheGet:          cacheGetFunc,
@@ -950,7 +953,7 @@ func (listener *CarbonserverListener) isQuotaEnabled() bool {
 func (listener *CarbonserverListener) ShouldThrottleMetric(ps *points.Points, inCache bool) bool {
 	fidx := listener.CurrentFileIndex()
 	if fidx == nil || fidx.trieIdx == nil {
-		return false
+		return listener.isQuotaEnabled()
 	}
 
 	var throttled = fidx.trieIdx.throttle(ps, inCache)
@@ -1031,7 +1034,51 @@ func (listener *CarbonserverListener) CurrentFileIndex() *fileIndex {
 	return p.(*fileIndex)
 }
 
-func (listener *CarbonserverListener) UpdateFileIndex(fidx *fileIndex) { listener.fileIdx.Store(fidx) }
+func (listener *CarbonserverListener) UpdateFileIndex(fidx *fileIndex) {
+	listener.fileIdx.Store(fidx)
+	if fidx != nil && fidx.trieIdx != nil && listener.quotaIndexReady != nil {
+		listener.quotaIndexOnce.Do(func() { close(listener.quotaIndexReady) })
+	}
+}
+
+// WaitForQuotaIndex keeps live input/capture replay behind the first complete
+// quota accounting. Listen starts the updater first; raw input may spool while
+// it builds the index. A failed scan never turns unknown usage into zero usage.
+func (listener *CarbonserverListener) WaitForQuotaIndex() error {
+	if !listener.isQuotaEnabled() {
+		return nil
+	}
+	if !listener.trieIndex || listener.getMetricIndexStore() == nil && listener.scanFrequency == 0 {
+		return fmt.Errorf("quota enforcement requires an active trie index updater")
+	}
+	select {
+	case <-listener.quotaIndexReady:
+		return nil
+	case <-listener.exitChan:
+		return fmt.Errorf("quota index initialization stopped")
+	}
+}
+
+// ShouldThrottleCreation enforces storage limits for raw restart input.
+// Accepted history uses separate recovery sources and never calls this hook.
+// Throughput windows continue to account live input through the ordinary hook.
+func (listener *CarbonserverListener) ShouldThrottleCreation(ps *points.Points, inCache bool) bool {
+	fidx := listener.CurrentFileIndex()
+	if fidx == nil || fidx.trieIdx == nil {
+		return listener.isQuotaEnabled()
+	}
+	if inCache {
+		return false
+	}
+	ti := fidx.trieIdx
+	if _, isNew := ti.metricPath(ps.Metric, nil); !isNew {
+		return false
+	}
+	dirs, isNew := ti.metricDirs(ps)
+	// Replay time is unrelated to arrival time: do not charge throughput or
+	// the creates-per-second limiter again when a durable source is replayed.
+	return isNew && ti.throttleUsage(ps, dirs)
+}
 
 // skipcq: RVV-A0005
 func (listener *CarbonserverListener) UpdateMetricsAccessTimes(metrics map[string]int64, initial bool) {

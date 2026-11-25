@@ -228,7 +228,7 @@ func (s *startupShard) newSegment(index uint64, syncDirectory bool) (*startupSeg
 			return nil, err
 		}
 	}
-	return &startupSegment{file: f, path: path, unlock: unlock, source: s.stream.Next()}, nil
+	return &startupSegment{file: f, path: path, unlock: unlock, source: s.stream.NextCaptured()}, nil
 }
 func (s *startupInput) CaptureShards() []tcp.Capture {
 	out := make([]tcp.Capture, len(s.shards))
@@ -865,7 +865,7 @@ func (s *startupInput) startReplay(sink *startupSink, legacy func() error) {
 			}
 			root := s.legacy.current.Load()
 			if root.source == nil {
-				root.source = s.legacy.stream.Next()
+				root.source = s.legacy.stream.NextCaptured()
 			}
 			root.sealed.Store(true)
 			root.replayed.Store(true)
