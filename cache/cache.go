@@ -900,6 +900,7 @@ func (c *Cache) addWithRestoreHashed(p *points.Points, restored, recovered, imme
 	// just as the old post-insertion lookup did.
 	if series != nil && exists && hash == series.hash && p.Metric == series.name {
 		shard.bindStreamHint(series.hint, values, slot)
+		bindStreamItem(series.series, values)
 	}
 	var throttleState any
 	liveAdmission := !recovered && (!restored || !immediate)
@@ -1009,6 +1010,7 @@ func (c *Cache) addWithRestoreHashed(p *points.Points, restored, recovered, imme
 	values.Arrival.Store(arrivalNanos(values.firstArrival))
 	if series != nil && !exists && hash == series.hash && p.Metric == series.name {
 		shard.bindStreamHint(series.hint, values, slot)
+		bindStreamItem(series.series, values)
 	}
 	return nil
 }

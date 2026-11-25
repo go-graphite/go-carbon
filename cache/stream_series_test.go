@@ -155,7 +155,13 @@ func TestStreamSeriesRejectedFallbackRefreshesHint(t *testing.T) {
 		})
 		s := c.ResolveStreamName([]byte("stream.rejected.hint")).(*StreamSeries)
 		c.addStreamSeries(s, 1, 1)
-		s.hint.Store(0) // Eviction/rehash can invalidate a previously warm hint.
+		s.hint.Store(0)
+		// Model removal or a table rebuild by clearing both hints, so the
+		// rejected existing item must take the cold refresh path below.
+		sh := c.data[s.hash&(shardCount-1)]
+		sh.mu.Lock()
+		s.item.unbindStreamItem()
+		sh.mu.Unlock()
 		if overflow {
 			c.SetMaxBytes(1)
 		}
@@ -164,7 +170,7 @@ func TestStreamSeriesRejectedFallbackRefreshesHint(t *testing.T) {
 			t.Fatal("rejected existing item did not refresh its hint")
 		}
 		c.addStreamSeries(s, -2, 3)
-		sh := c.data[s.hash&(shardCount-1)]
+		sh = c.data[s.hash&(shardCount-1)]
 		it := sh.items.get(s.name)
 		// The ordinary fallback uses scratch quota state, and the warm path uses
 		// item state directly, including on rejection. Preserve both behaviors.

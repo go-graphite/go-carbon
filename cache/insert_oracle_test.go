@@ -26,8 +26,9 @@ func TestCacheInsertMetricMemoryBound(t *testing.T) {
 		t.Skip("64-bit layout bound")
 	}
 	// The queued source hint avoids repeated recovery-map probes. Its 8 bytes
-	// are accounted along with the atomic journal residence timestamp.
-	if size := unsafe.Sizeof(item{}); size != 208 {
+	// are accounted along with the atomic journal residence timestamp. The weak
+	// stream back-reference adds eight bytes and never retains a series identity.
+	if size := unsafe.Sizeof(item{}); size != 216 {
 		t.Fatalf("item bookkeeping grew to %d bytes", size)
 	}
 }

@@ -1,6 +1,10 @@
 package cache
 
-import "github.com/go-graphite/go-carbon/points"
+import (
+	"weak"
+
+	"github.com/go-graphite/go-carbon/points"
+)
 
 // AddStreamPoints admits a consecutive run from one stream dictionary slot.
 // It borrows data and slot until return. Admission and logging remain per point.
@@ -31,13 +35,19 @@ func (c *Cache) tryStreamPoints(series *StreamSeries, data []points.Point) (n in
 	sh := c.data[series.hash&(shardCount-1)]
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
-	slot := uint32(h&0xffffff) - 1
-	if int(slot) >= len(sh.items.slots) {
-		return 0
-	}
-	it := sh.items.slots[slot].item
-	if it == nil || it.streamGeneration != h>>24 {
-		return 0
+	it := series.item
+	if it == nil {
+		slot := uint32(h&0xffffff) - 1
+		if h == 0 || int(slot) >= len(sh.items.slots) {
+			return 0
+		}
+		it = sh.items.slots[slot].item
+		if it == nil || it.streamGeneration != h>>24 {
+			return 0
+		}
+		if it.streamSeries == (weak.Pointer[StreamSeries]{}) {
+			bindStreamItem(series, it)
+		}
 	}
 	for _, p := range data {
 		s := c.settings.Load().(*cacheSettings)

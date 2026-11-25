@@ -8,8 +8,16 @@ import (
 	"github.com/go-graphite/go-carbon/points"
 )
 
+// Keep byte admission compatible with caches that predate direct stream hints.
+// The optional weak backlink is lookup bookkeeping, excluded from the admission
+// estimate just like allocator size-class rounding. Its real allocation cost is
+// separate from this stable charge.
+// Include alignment padding: atomic fields keep item eight-byte aligned on 32-bit.
+const streamItemHintBytes = (unsafe.Sizeof(item{}.streamSeries) + unsafe.Alignof(item{}) - 1) / unsafe.Alignof(item{}) * unsafe.Alignof(item{})
+const chargedItemBytes = int64(unsafe.Sizeof(item{}) - streamItemHintBytes)
+
 func (it *item) memoryBytes() int64 {
-	return int64(unsafe.Sizeof(item{})) + it.extraMemory() + int64(len(it.Metric)+cap(it.compact.buf))
+	return chargedItemBytes + it.extraMemory() + int64(len(it.Metric)+cap(it.compact.buf))
 }
 
 func (it *item) extraMemory() int64 {
@@ -22,7 +30,7 @@ func (it *item) extraMemory() int64 {
 func flightMemory(p *points.Points) int64 {
 	// Staging may retain the popped item until its log batch is consumed.
 	// Conservatively charge it along with the newly detached Points header.
-	return int64(unsafe.Sizeof(item{})) + int64(unsafe.Sizeof(points.Points{})) + int64(len(p.Metric)) + int64(cap(p.Data))*int64(unsafe.Sizeof(points.Point{}))
+	return chargedItemBytes + int64(unsafe.Sizeof(points.Points{})) + int64(len(p.Metric)) + int64(cap(p.Data))*int64(unsafe.Sizeof(points.Point{}))
 }
 
 // memoryBytes estimates owned allocations under the shard lock. Map overhead
@@ -95,6 +103,8 @@ func (c *Cache) queueMemory() int64 {
 
 // EstimatedBytes accounts for queued names, items, buffer capacities and indexes,
 // in-flight batches, input-log tracking/buffers, sparse tables and queue scratch.
+// Direct stream-hint bookkeeping and allocator size-class rounding are excluded
+// to preserve the byte-admission estimate across lookup implementations.
 // It visits shards, not metrics. Pending recovery's mapped files and the input
 // log encoder's own buffers are outside the cache's ownership. Shard totals are
 // published at allocation changes; sampling never waits for a shard lock.
