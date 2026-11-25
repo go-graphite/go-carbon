@@ -196,8 +196,15 @@ effect on the next pass. SIGHUP joins the old worker before replacing it. Disabl
 The worker refreshes the index and materializes the same quota assignments that
 enforce ingestion. It counts committed catalog names rather than trusting the
 periodically refreshed usage counter. When there is excess, a second paced
-catalog pass retains at most `store-expiration-max-deletes` newest candidates in
-a heap. Memory is bounded by the matched namespace count plus this candidate
+catalog pass retains at most `store-expiration-max-deletes` candidates across
+bounded heaps. Independent namespace trees split that limit in proportion to
+their committed excess, rounded with largest remainders (namespace order breaks
+ties). Each tree selects its highest catalog IDs within that allocation. An
+opted-in descendant shares its outermost opted-in ancestor's allocation, avoiding
+double counting overlapping excess. Selection still reserves every matching
+cap; protected descendants or concurrent catalog changes can leave some slots
+unused, and skipped slots are not redistributed during the pass. Small shares
+can round to zero; this is proportional allocation, not round-robin scheduling. Memory is bounded by the matched namespace count plus this candidate
 limit; catalog scans themselves visit the entire catalog. Names outside opted-in
 namespaces are ignored. The pass reserves each overlapping opted-in namespace's
 excess before dispatch, so trimming cannot take those namespaces below their
@@ -266,14 +273,46 @@ names use the same shortening/hash rule as quota metrics). Overlapping rules
 count a candidate under every affected namespace; global counters count each
 name once. Candidates are the planned names for that pass, capped by the pass
 limit. Skipped means planned but not deleted, including every dry-run candidate.
-Per-namespace logs also include the full excess count, cap, rule, dry-run flag,
-and up to ten candidate names.
+A single `quota trim plan` log event, emitted before execution, includes every
+materialized namespace's full excess, cap, rule, candidate count and up to ten
+sample names, including namespaces assigned zero candidates. Keeping the plan
+in one event prevents message-based log sampling from silently hiding later
+namespaces. The existing per-namespace outcome events may still be sampled.
+
+The read-only `/admin/info?scopes=quotaTrim` response contains the last published
+plan under `quotaTrim.plan`, including `plannedAt`, `dryRun`, `maxDeletes`, all
+namespace summaries, and the exact selected `names` with catalog IDs. It reads
+an immutable in-memory snapshot; polling does not scan or mutate the catalog.
+`plan` is null until the first successful planning phase. Interval stats scrapes
+do not clear it. The snapshot survives policy reloads until another plan is
+published, so check its timestamp, dry-run flag and captured rules/caps against
+the intended configuration. It describes selection, not deletion outcomes.
+Names appear once globally, including when several overlapping namespaces count
+them. Group the exact candidates per namespace with:
+
+```sh
+curl -fsS 'http://127.0.0.1:8080/admin/info?scopes=quotaTrim' > quota-trim-plan.json
+jq '.quotaTrim.plan as $p | $p.namespaces[] |
+  .namespace as $ns |
+  {namespace, cap, excess, candidates, names: [ $p.names[] |
+    select($ns == "/" or (.name | startswith($ns + "."))) ]}' quota-trim-plan.json
+```
+
+The admin snapshot avoids log transport size limits and retains only the bounded
+candidate set. Neither endpoint nor log lists all excess names beyond this pass's
+budget. Protect this admin surface as for the existing config/cache diagnostics.
 Errors are logged at error level; watch `quota.trim.errors`,
 `storage.expiration.errors`, `persister.write_failed_points_total` (no increase),
 and index refresh errors.
 
-Start on one store with dry-run, inspect the selected count and age-order caveats,
-then set `quota-trim-dry-run = false` and SIGHUP. Watch deleted counts and
+Start on one store with dry-run, save the exact admin plan, inspect every
+namespace's cap/excess/count and candidate names/IDs, and review the age-order
+caveats. Dry-run and live mode call the same planner; on an unchanged catalog and
+policy their candidate sets are identical. Switching mode starts a new plan,
+not execution of a frozen approval: arrivals, imports, deletion or policy changes
+can change that set, and cache/revision/pressure checks can make live mode skip
+selected names. A previously saved plan is not a guarantee of the next pass.
+Then set `quota-trim-dry-run = false` and SIGHUP. Watch deleted counts and
 `usage.metrics.<suffix>` converge toward `quota.metrics.<suffix>`, with write
 errors remaining zero. To stop, set `quota-trim-enabled = false` and SIGHUP; remove
 `over-quota` to remove the policy as well. Keep `dropping-policy = new` explicitly

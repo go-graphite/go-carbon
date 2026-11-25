@@ -2,12 +2,15 @@ package carbon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +19,7 @@ import (
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/persister"
 	"github.com/go-graphite/go-carbon/points"
+	"github.com/lomik/zapwriter"
 )
 
 func trimTestRule(namespace string, cap int64) carbonserver.QuotaTrimRule {
@@ -319,6 +323,7 @@ func TestQuotaTrimPollingLifecycleAndIndex(t *testing.T) {
 	writeQuota("over-quota=delete-newest\n")
 	waitExpiration(t, func() bool { rules, err := app.Carbonserver.QuotaTrimRules(); return err == nil && len(rules) == 2 })
 	r := trimTestExpirer(app.MetricStore, time.Now())
+	r.stats = app.expirationStats
 	r.trimRules = app.Carbonserver.QuotaTrimRules
 	r.notify = app.Carbonserver.RequestFileScan
 	r.pending = app.Cache.Has
@@ -327,6 +332,21 @@ func TestQuotaTrimPollingLifecycleAndIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 	trimTestNames(t, app.MetricStore, "apps.a.new", "apps.a.old", "apps.b.new", "apps.b.old")
+	response, err := http.Get("http://" + app.Carbonserver.HTTPListener().Addr().String() + "/admin/info?scopes=quotaTrim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var admin struct {
+		QuotaTrim struct {
+			Plan quotaTrimPlan `json:"plan"`
+		} `json:"quotaTrim"`
+	}
+	err = json.NewDecoder(response.Body).Decode(&admin)
+	response.Body.Close()
+	if err != nil || response.StatusCode != 200 || admin.QuotaTrim.Plan.Candidates != 2 || !admin.QuotaTrim.Plan.DryRun || len(admin.QuotaTrim.Plan.Names) != 2 {
+		t.Fatalf("admin plan=%+v status=%d err=%v", admin, response.StatusCode, err)
+	}
+
 	r.trimDryRun = false
 	if err := r.sweep(context.Background()); err != nil {
 		t.Fatal(err)
@@ -393,4 +413,178 @@ func TestQuotaTrimAndTTLShareLimitAcrossStatsCollection(t *testing.T) {
 		t.Fatal(err)
 	}
 	trimTestNames(t, db, "jobs.old", "outside.old")
+}
+
+func TestQuotaTrimBudgetSplit(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		namespaces []string
+		excess     []int64
+		limit      int
+		want       []int
+	}{
+		{"proportional", []string{"a", "b", "c"}, []int64{10, 30, 60}, 10, []int{1, 3, 6}},
+		{"remainder", []string{"c", "b", "a"}, []int64{1, 1, 1}, 2, []int{0, 1, 1}},
+		{"bounded", []string{"a", "b"}, []int64{1, 2}, 1000, []int{1, 2}},
+		{"at cap", []string{"a", "b"}, []int64{0, 4}, 2, []int{0, 2}},
+		{"nested", []string{"apps.child", "apps", "other"}, []int64{2, 4, 4}, 4, []int{0, 2, 2}},
+		{"root", []string{"a", "/"}, []int64{2, 4}, 2, []int{0, 2}},
+		{"large counts", []string{"a", "b"}, []int64{1 << 61, 1 << 61}, 1000, []int{500, 500}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rules := make([]carbonserver.QuotaTrimRule, len(tc.namespaces))
+			for i, ns := range tc.namespaces {
+				rules[i] = trimTestRule(ns, 1)
+			}
+			_, got := quotaTrimBudgets(rules, tc.excess, tc.limit)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("budgets=%v want=%v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestQuotaTrimPlanSurvivesSamplingAndMatchesLive(t *testing.T) {
+	defer zapwriter.Test()()
+	logPath := filepath.Join(t.TempDir(), "quota.json")
+	cfg := zapwriter.NewConfig()
+	cfg.Logger, cfg.File, cfg.Encoding, cfg.Level = "quota", logPath, "json", "info"
+	cfg.SampleTick, cfg.SampleInitial, cfg.SampleThereafter = "1h", 5, 100
+	if err := zapwriter.ApplyConfig([]zapwriter.Config{cfg}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(100000, 0)
+	db := expirationTestDB(t, &now)
+	var rules []carbonserver.QuotaTrimRule
+	for i := range 12 {
+		ns := fmt.Sprintf("ns%02d", i)
+		rules = append(rules, trimTestRule(ns, 1))
+		for j := range 3 {
+			createExpirationMetric(t, db, fmt.Sprintf("%s.m%d", ns, j))
+		}
+	}
+	createExpirationMetric(t, db, "under.keep")
+	rules = append(rules, trimTestRule("under", 2))
+	r := trimTestExpirer(db, now, rules...)
+	r.maxDeletes, r.trimDryRun = 12, true
+	if err := r.sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	preview := r.stats.trim.Info()["plan"].(*quotaTrimPlan)
+	if preview.Candidates != 12 || len(preview.Namespaces) != 13 {
+		t.Fatalf("plan=%+v", preview)
+	}
+	for i, node := range preview.Namespaces {
+		if i == 12 {
+			if node.Candidates != 0 || node.Excess != 0 {
+				t.Fatal(node)
+			}
+			continue
+		}
+		if node.Excess != 2 || node.Candidates != 1 || len(node.Samples) != 1 || node.Samples[0] != fmt.Sprintf("ns%02d.m2", i) {
+			t.Fatalf("incorrect newest candidate: %+v", node)
+		}
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reported []quotaTrimNamespacePlan
+	for _, line := range strings.Split(string(data), "\n") {
+		var event struct {
+			Message    string                   `json:"message"`
+			Namespaces []quotaTrimNamespacePlan `json:"namespaces"`
+		}
+		if json.Unmarshal([]byte(line), &event) == nil && event.Namespaces != nil {
+			reported = event.Namespaces
+		}
+	}
+	if !reflect.DeepEqual(reported, preview.Namespaces) {
+		t.Fatalf("sampled log lost plan: %s", data)
+	}
+	// Concurrent admin reads and interval resets retain one immutable snapshot.
+	var readers sync.WaitGroup
+	for range 4 {
+		readers.Go(func() {
+			for range 100 {
+				_ = r.stats.trim.Info()
+				r.stats.trim.Stat(func(string, float64) {})
+			}
+		})
+	}
+	if r.stats.trim.Info()["plan"] != preview {
+		t.Fatal("collector cleared plan")
+	}
+	r.trimDryRun = false
+	if err := r.sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	readers.Wait()
+	live := r.stats.trim.Info()["plan"].(*quotaTrimPlan)
+	if !reflect.DeepEqual(preview.Names, live.Names) || !reflect.DeepEqual(preview.Namespaces, live.Namespaces) {
+		t.Fatalf("preview/live differ: %+v / %+v", preview, live)
+	}
+	for _, candidate := range preview.Names {
+		if _, err := db.Metadata(context.Background(), candidate.Name); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("preview name survived: %s %v", candidate.Name, err)
+		}
+		if _, err := db.ExpirationReceiptFor(context.Background(), candidate.Name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := db.List(context.Background(), "")
+	if err != nil || len(rows) != 25 {
+		t.Fatalf("unplanned deletion: rows=%d err=%v", len(rows), err)
+	}
+}
+
+func TestQuotaTrimTaggedAliasPending(t *testing.T) {
+	now := time.Unix(100000, 0)
+	db := expirationTestDB(t, &now)
+	createExpirationMetric(t, db, "jobs.old")
+	createExpirationMetric(t, db, "jobs.new;a=1;z=2")
+	core := cache.New()
+	core.SetTagsEnabled(true)
+	core.Add(points.OnePoint("jobs.new;z=2;a=1", 42, now.Unix()))
+	r := trimTestExpirer(db, now, trimTestRule("jobs", 1))
+	r.pending = core.Has
+	if err := r.sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	plan := r.stats.trim.Info()["plan"].(*quotaTrimPlan)
+	if plan.Candidates != 1 || plan.Names[0].Name != "jobs.new;a=1;z=2" {
+		t.Fatal(plan)
+	}
+	trimTestNames(t, db, "jobs.new;a=1;z=2", "jobs.old")
+	if r.stats.trim.total.deleted != 0 || r.stats.trim.total.skipped != 1 {
+		t.Fatal(r.stats.trim.total)
+	}
+}
+
+func TestQuotaTrimSelectsNewestWithinProportionalShares(t *testing.T) {
+	now := time.Unix(100000, 0)
+	db := expirationTestDB(t, &now)
+	for _, ns := range []string{"older", "newer"} {
+		n := 3
+		if ns == "newer" {
+			n = 7
+		}
+		for i := range n {
+			createExpirationMetric(t, db, fmt.Sprintf("%s.m%d", ns, i))
+		}
+	}
+	rules := []carbonserver.QuotaTrimRule{trimTestRule("older", 1), trimTestRule("newer", 1)}
+	r := trimTestExpirer(db, now, rules...)
+	r.maxDeletes = 4
+	selected, excess, err := r.planQuotaTrim(context.Background(), rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, m := range selected {
+		names = append(names, m.Name)
+	}
+	if !reflect.DeepEqual(excess, []int64{2, 6}) || !reflect.DeepEqual(names, []string{"newer.m6", "newer.m5", "newer.m4", "older.m2"}) {
+		t.Fatalf("excess=%v selected=%v", excess, names)
+	}
 }

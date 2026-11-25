@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/bits"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/go-graphite/go-carbon/carbonserver"
 	"github.com/go-graphite/go-carbon/helper"
@@ -44,6 +46,36 @@ type quotaTrimStats struct {
 	total  quotaTrimCounts
 	errors uint64
 	rules  map[string]quotaTrimCounts
+	plan   *quotaTrimPlan
+}
+
+// Published once, before execution, and never mutated. Stats collection must
+// not clear the last plan: operators may inspect it between interval scrapes.
+type quotaTrimCandidate struct {
+	Name string `json:"name"`
+	ID   uint64 `json:"id"`
+}
+type quotaTrimNamespacePlan struct {
+	Namespace  string   `json:"namespace"`
+	Rule       string   `json:"rule"`
+	Cap        int64    `json:"cap"`
+	Excess     int64    `json:"excess"`
+	Candidates int      `json:"candidates"`
+	Samples    []string `json:"samples"`
+}
+type quotaTrimPlan struct {
+	PlannedAt  time.Time                `json:"plannedAt"`
+	DryRun     bool                     `json:"dryRun"`
+	MaxDeletes int                      `json:"maxDeletes"`
+	Candidates int                      `json:"candidates"`
+	Names      []quotaTrimCandidate     `json:"names"`
+	Namespaces []quotaTrimNamespacePlan `json:"namespaces"`
+}
+
+func (s *quotaTrimStats) Info() map[string]interface{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return map[string]interface{}{"plan": s.plan}
 }
 
 func (s *quotaTrimStats) record(name string, c quotaTrimCounts) {
@@ -91,6 +123,52 @@ func (h trimHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
 func (h *trimHeap) Push(x any)   { *h = append(*h, x.(store.Metadata)) }
 func (h *trimHeap) Pop() any     { a := *h; x := a[len(a)-1]; *h = a[:len(a)-1]; return x }
 
+// Independent namespace trees share the pass budget in proportion to their
+// excess, using largest remainders and a lexical tie break. Nested caps share
+// their root's slice rather than counting the same excess twice.
+func quotaTrimBudgets(rules []carbonserver.QuotaTrimRule, excess []int64, limit int) ([]int, []int) {
+	roots, budgets := make([]int, len(rules)), make([]int, len(rules))
+	var total uint64
+	for i, q := range rules {
+		roots[i] = i
+		for j, parent := range rules {
+			if i != j && trimContains(parent.Namespace, q.Namespace) && (roots[i] == i || len(parent.Namespace) < len(rules[roots[i]].Namespace)) {
+				roots[i] = j
+			}
+		}
+		if roots[i] == i {
+			total += uint64(excess[i])
+		}
+	}
+	if total == 0 || limit <= 0 {
+		return roots, budgets
+	}
+	slots := min(uint64(limit), total)
+	type share struct {
+		index     int
+		remainder uint64
+	}
+	var shares []share
+	var assigned uint64
+	for i, root := range roots {
+		if root != i || excess[i] == 0 {
+			continue
+		}
+		hi, lo := bits.Mul64(uint64(excess[i]), slots)
+		n, remainder := bits.Div64(hi, lo, total)
+		budgets[i] = int(n)
+		assigned += n
+		shares = append(shares, share{i, remainder})
+	}
+	sort.Slice(shares, func(i, j int) bool {
+		return shares[i].remainder > shares[j].remainder || shares[i].remainder == shares[j].remainder && rules[shares[i].index].Namespace < rules[shares[j].index].Namespace
+	})
+	for _, share := range shares[:int(slots-assigned)] {
+		budgets[share.index]++
+	}
+	return roots, budgets
+}
+
 // Use committed catalog counts rather than periodically refreshed usage. The
 // single maintenance worker serializes trimming and TTL expiration. Reserve all
 // overlapping namespace budgets before dispatch, including children at cap.
@@ -128,9 +206,10 @@ func (r *metricExpirer) planQuotaTrim(ctx context.Context, rules []carbonserver.
 	if !anyExcess {
 		return nil, excess, nil
 	}
-	var newest trimHeap
+	roots, budgets := quotaTrimBudgets(rules, excess, r.maxDeletes)
+	heaps := make([]trimHeap, len(rules))
 	if err := scan(func(m store.Metadata) {
-		matched := false
+		root := -1
 		for i, q := range rules {
 			if !trimContains(q.Namespace, m.Name) {
 				continue
@@ -138,17 +217,22 @@ func (r *metricExpirer) planQuotaTrim(ctx context.Context, rules []carbonserver.
 			if excess[i] == 0 {
 				return
 			}
-			matched = true
+			root = roots[i]
 		}
-		if !matched {
+		if root < 0 || budgets[root] == 0 {
 			return
 		}
-		heap.Push(&newest, m)
-		if newest.Len() > r.maxDeletes {
-			heap.Pop(&newest)
+		newest := &heaps[root]
+		heap.Push(newest, m)
+		if newest.Len() > budgets[root] {
+			heap.Pop(newest)
 		}
 	}); err != nil {
 		return nil, nil, err
+	}
+	var newest trimHeap
+	for _, h := range heaps {
+		newest = append(newest, h...)
 	}
 	sort.Slice(newest, func(i, j int) bool {
 		return newest[i].ID > newest[j].ID || newest[i].ID == newest[j].ID && newest[i].Name > newest[j].Name
@@ -247,6 +331,19 @@ func (r *metricExpirer) trimQuota(ctx context.Context) (int, error) {
 			}
 		}
 	}
+	plan := &quotaTrimPlan{PlannedAt: r.now(), DryRun: r.trimDryRun, MaxDeletes: r.maxDeletes, Candidates: len(selected), Names: make([]quotaTrimCandidate, 0, len(selected)), Namespaces: make([]quotaTrimNamespacePlan, 0, len(rules))}
+	for _, m := range selected {
+		plan.Names = append(plan.Names, quotaTrimCandidate{m.Name, m.ID})
+	}
+	for i, q := range rules {
+		plan.Namespaces = append(plan.Namespaces, quotaTrimNamespacePlan{Namespace: q.Namespace, Rule: q.Quota.Pattern, Cap: q.Quota.Metrics, Excess: excess[i], Candidates: int(planned[i]), Samples: samples[i]})
+	}
+	r.stats.trim.mu.Lock()
+	r.stats.trim.plan = plan
+	r.stats.trim.mu.Unlock()
+	// One event per pass: a sampler keyed on level/message cannot drop later
+	// namespaces in the burst. The admin snapshot also avoids log truncation.
+	zapwriter.Logger("quota").Info("quota trim plan", zap.Time("plannedAt", plan.PlannedAt), zap.Bool("dryRun", plan.DryRun), zap.Int("maxDeletes", plan.MaxDeletes), zap.Int("candidates", plan.Candidates), zap.Any("namespaces", plan.Namespaces))
 	defer func() {
 		total := quotaTrimCounts{uint64(len(selected)), totalDeleted.Load(), uint64(len(selected)) - totalDeleted.Load()}
 		s := &r.stats.trim
