@@ -4,7 +4,9 @@ By default, `storectl sync` verifies the discovered catalog once, fills holes,
 then verifies only the previous round's hole, skipped and unindexed names. It
 stops after that second verification and reports unresolved names in
 `residual.json` and `sync_done`; it does not keep retrying live mutations.
-Existing target points continue to win during imports. A completed pass is an
+Finite target points continue to win during imports. A finite donor repairs an
+infinite target at the same timestamp, matching verification's finite-point
+definition of a hole; existing NaN normalization is unchanged. A completed pass is an
 observation of its selected names and time horizon, not a live readiness proof.
 READY remains a separate, explicit attestation.
 

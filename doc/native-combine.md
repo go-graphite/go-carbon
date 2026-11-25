@@ -2,7 +2,36 @@
 
 The opt-in native combine engine merges names already present on a survivor.
 It keeps coarse archives independently authoritative and gives the survivor
-precedence at equal timestamps, matching the reviewed transfer importer.
+precedence at equal timestamps, except that a finite donor repairs an infinite
+survivor value. This matches the transfer importer and sync's finite-point
+coverage definition. NaN normalization is unchanged.
+
+## Non-finite history repair
+
+An explicit `Fill`, transfer import, or native combine replaces `+Inf` or `-Inf`
+at an equal timestamp only when the donor is finite. Finite target values,
+including signed zero, keep their exact bits. Two infinite values keep the
+target. NaNs still normalize away within a fill; window fills preserve points
+outside their requested window. Timestamp/ring-owner selection is unchanged.
+
+The sorted archive union, exact-block combine and classic window patch apply
+this rule. Encoded continuation splicing requires finite values and falls back
+to the archive union when it encounters an infinity. Transfer append is bypassed
+when the union repairs an infinity, so old target buffers cannot restore it.
+
+The plaintext receiver accepts explicit infinities. A client-supplied infinity
+can propagate through sum/average rollups to coarse archives. Empty rollup
+windows are guarded; an empty average would yield NaN, not infinity. Extremely
+large finite sums can still overflow IEEE-754 float64 arithmetic. Decimal
+encoding excludes non-finite input and its decoder rejects overflow; exact and
+cold-pack float codecs preserve existing infinity bits. Imports preserve coarse
+archives independently, without deriving them again from finer archives.
+
+This deliberately treats even a client-intended infinity as a repairable hole
+when an operator requests a fill with finite donor coverage. It keeps verify and
+fill consistent. Ordinary live writes, read merging, compaction and cold packing
+retain their existing ordering: older stored finite data cannot replace a newer
+live infinity through those paths. This is a fill policy, not an intake filter.
 
 ## Encoded history
 
@@ -67,7 +96,7 @@ participate. Coarse values are copied bit for bit; aggregation and xFilesFactor
 are not reapplied. The original requested window still binds the wire checksum,
 range identity, and import validation. The framing and capabilities are unchanged:
 existing clients can use the new exporter, and an older exporter continues to
-reject historical requests safely. Target collision and target-wins checks remain
+reject historical requests safely. Target collision and finite-target precedence checks remain
 in force.
 
 ## Qualification

@@ -7,7 +7,8 @@ import (
 
 // Both snapshot readers return timestamp-sorted, privately owned arrays.
 // Normalization therefore preserves order, allowing the exact fillArchive
-// result without its whole-archive hash table and reflection-based sort.
+// result without its whole-archive hash table and reflection-based sort. This
+// is an explicit history fill policy, never the live-write/read merge policy.
 func nativeArchiveUnion(source, target Archive) ([]Point, bool, bool, error) {
 	return nativeArchiveUnionInto(source, target, nil, true)
 }
@@ -22,6 +23,7 @@ func nativeArchiveUnionInto(source, target Archive, out []Point, classify bool) 
 		return nil, false, false, err
 	}
 	intersects := classify && nativeSlotsIntersect(a, b, source.Retention)
+	changed := changedA || changedB
 	if len(a) == 0 {
 		return append(out[:0], b...), intersects, changedA || changedB, nil
 	}
@@ -42,14 +44,27 @@ func nativeArchiveUnionInto(source, target Archive, out []Point, classify bool) 
 			out = append(out, b[j])
 			j++
 		default:
-			out = append(out, b[j]) // target wins, including signed zero
+			winner := b[j] // finite targets win, including signed zero
+			if PreferFiniteFill(a[i].Value, b[j].Value) {
+				winner = a[i]
+				changed = true // an append preserving target buffers is unsafe
+			}
+			out = append(out, winner)
 			i++
 			j++
 		}
 	}
 	out = append(out, a[i:]...)
 	out = append(out, b[j:]...)
-	return out, intersects, changedA || changedB, nil
+	return out, intersects, changed, nil
+}
+
+// PreferFiniteFill agrees with sync's finite-point coverage definition. NaNs
+// keep their existing normalization; two infinities still keep the target.
+// Call only for equal timestamps in an explicit fill/import, never to choose
+// between different ring owners or to merge live writes with stored history.
+func PreferFiniteFill(donor, target float64) bool {
+	return math.IsInf(target, 0) && !math.IsNaN(donor) && !math.IsInf(donor, 0)
 }
 
 func nativeNormalizeArchive(points []Point, step int) ([]Point, bool, error) {

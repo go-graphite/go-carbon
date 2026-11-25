@@ -728,8 +728,17 @@ func fillArchive(source, destination []Point, step int) ([]Point, error) {
 	if err := addFillPoints(byTime, source, step); err != nil {
 		return nil, err
 	}
-	if err := addFillPoints(byTime, destination, step); err != nil {
+	// Resolve duplicates within the target first: its last point still wins,
+	// even if that point is infinite. Only the donor may repair that winner.
+	target := make(map[int64]float64, len(destination))
+	if err := addFillPoints(target, destination, step); err != nil {
 		return nil, err
+	}
+	for timestamp, value := range target {
+		donor, exists := byTime[timestamp]
+		if !exists || !PreferFiniteFill(donor, value) {
+			byTime[timestamp] = value
+		}
 	}
 	points := make([]Point, 0, len(byTime))
 	for timestamp, value := range byTime {

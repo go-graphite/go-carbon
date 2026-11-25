@@ -14,6 +14,34 @@ import (
 	whisper "github.com/go-graphite/go-whisper"
 )
 
+func TestNativeSpliceOverflowRollupUsesFillUnion(t *testing.T) {
+	ctx := context.Background()
+	clock := func() time.Time { return time.Unix(1000000, 0) }
+	source, target, reference := combineMemoryStore(t, clock, false), combineMemoryStore(t, clock, false), combineMemoryStore(t, clock, false)
+	cfg := store.MetricConfig{Name: "splice.overflow", Retentions: []store.Retention{{Step: 10, Count: 600}, {Step: 60, Count: 1000}}, AggregationMethod: store.Sum}
+	for _, db := range []*store.Store{source, target, reference} {
+		if _, err := db.Create(ctx, cfg); err != nil {
+			t.Fatal(err)
+		}
+		v := 1e308 // Two finite inputs overflow the virtual sum, as IEEE-754 requires.
+		if db == source {
+			v = 16
+		}
+		if err := db.UpdateMany(ctx, cfg.Name, []store.Point{{Timestamp: 999000, Value: v}, {Timestamp: 999010, Value: v}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := target.Snapshot(ctx, cfg.Name)
+	if err != nil || len(before.Archives[1].Points) == 0 || !math.IsInf(before.Archives[1].Points[0].Value, 1) {
+		t.Fatal("expected overflowing target sum", before, err)
+	}
+	compareNativeCombine(t, source, target, reference, cfg.Name)
+	after, err := target.Snapshot(ctx, cfg.Name)
+	if err != nil || len(after.Archives[1].Points) == 0 || after.Archives[1].Points[0].Value != 32 {
+		t.Fatal("finite donor must repair overflowing sum", after, err)
+	}
+}
+
 func TestNativeSplicePreservesHistoryAndFutureWrites(t *testing.T) {
 	for _, mode := range []struct {
 		name                      string
