@@ -421,7 +421,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 	for s := 0; s < cfg.Shards; s++ {
 		opening.Go(func() error {
 			dir := filepath.Join(root, fmt.Sprintf("owner-%03d", s))
-			opts := &pebble.Options{ReadOnly: readOnly, MemTableSize: 16 << 20, MaxConcurrentCompactions: func() int { return 2 }}
+			opts := &pebble.Options{ReadOnly: readOnly, FS: ownerMetadataFS{vfs.Default}, MemTableSize: 16 << 20, MaxConcurrentCompactions: func() int { return 2 }}
 
 			opts.Experimental.TableCacheShards = 1
 			opts.BytesPerSync = 64 << 20
