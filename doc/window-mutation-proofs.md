@@ -91,9 +91,59 @@ gap from process wall-clock downtime or from a zero backlog gauge.
 
 ## Explicit retirement
 
-Scopes persist until explicitly retired; they have no TTL. A restart does not
-retire them. Their normal lifecycle is registration during verification, tracked
-writes while verification is active, then release at terminal sync closeout.
+Scopes normally register during verification, track writes while verification
+is active, and release at terminal sync closeout. Idle expiry provides a safety
+net for crashed clients, deleted sync state and older clients that never release.
+A restart preserves registration timestamps; it does not renew scopes.
+
+### Idle expiry
+
+```toml
+[whisper]
+mutation-proof-scope-ttl = "72h" # 0s disables expiry; restart to change
+```
+
+Each exact scope stores `LastRegistered` as Unix nanoseconds. Re-registering the
+same bounds renews this timestamp without changing its window revision stamp.
+Ordinary writes do not renew it. The default 72h allows three days between proof
+requests for a given name/window, accommodating long verification rounds and
+multi-day pauses. It is an idle allowance, not a limit on total sync duration:
+verification (`verifyFrontierBatch` → `proofStampsMetadata` →
+`windowProofsVersion`), resume/frontier checks and READY resealing request proofs
+again on all holders. Each request renews the scopes it touches. A name not
+revisited for more than 72h becomes eligible for conservative revalidation even
+if the overall pass is still running. Increase the TTL for longer idle intervals,
+or use `0s` to retain scopes until explicit release/reset. `--no-release-proofs`
+opts out of terminal release only; it does not disable idle expiry.
+
+Expiry is lazy, with no background scanner. A write that reads history while
+holding the metric's existing mutation stripe/reservation removes scopes idle
+strictly longer than the TTL. Continuation writes do this before enabling
+before/after reconstruction. Changed exact-block writes do it while staging
+history. Removing the last scope deletes the entire history key in the same
+point/revision batch; partial expiry preserves the maintained stamps for the
+remaining scopes. Bookkeeping-only continuation updates commit the stamp or
+tombstone even when point data does not change. Failed batches publish neither
+expiry nor its counters. Pending imports and staged same-name batches keep their
+existing reservation fences, so a prior writer cannot resurrect an old stamp
+after an untracked change.
+
+Legacy scopes have no timestamp (or zero): their first registration/write touch
+with expiry enabled stamps them, giving them a full TTL grace period. They do not
+expire immediately on upgrade. With expiry disabled, registration still records
+renewals; write-time expiry/stamping is skipped. Histories remain Version=1 JSON:
+the decoder uses `json.Unmarshal`, so old readers ignore the additional field,
+and new readers accept its absence and unknown future fields. Rolling back to an
+older writer can drop timestamps; a later upgrade grants those records a fresh
+grace period. Clock rollback delays expiry conservatively. Missing or corrupt
+history never supplies an old selective stamp: the existing revision/UNKNOWN or
+error path remains in force.
+
+Expiry changes only proof bookkeeping. An in-window mutation after retirement
+still advances the whole-metric revision; re-registration starts at that current
+revision. Consumers therefore revalidate conservatively after an idle interval
+longer than the TTL, and cannot retain an old clean token across an intervening
+change. No saved history is restored.
 
 `storectl sync` releases proof scopes on the target and every donor after the
 final comparison and, when requested, READY publication. It first durably writes
@@ -113,10 +163,11 @@ reply lost before the cursor is saved can cause an idempotent retry. Successfull
 checkpointed pages are skipped. `--no-release-proofs` opts out, for example when
 coordinating overlapping verification or communicating with an older server.
 
-Release is conservative for other proof consumers: there are no scope owners or
-leases, and releasing one name can invalidate another consumer's proof reuse.
-Sync releases all scopes on its catalogued names. Coordinate overlapping jobs or
-use the opt-out to retain their scopes until every consumer has finished.
+Release is conservative for other proof consumers: there are no scope owners,
+and releasing one name can invalidate another consumer's proof reuse. Sync
+releases all scopes on its catalogued names. Coordinate overlapping jobs or use
+the opt-out. To retain scopes through longer idle periods as well, increase the
+TTL or disable idle expiry.
 
 ### Maintenance API
 
@@ -168,6 +219,8 @@ Prometheus exposes cumulative process counters:
 - `pebble_mutation_proof_untracked_writes_total`
 - `pebble_mutation_proof_scopes_registered_total`
 - `pebble_mutation_proof_scopes_released_total`
+- `pebble_mutation_proof_scopes_expired_total`
+- `pebble_mutation_proof_histories_expired_total`
 - `pebble_mutation_proof_resets_total`
 - `pebble_mutation_proof_release_errors_total`
 
@@ -175,9 +228,12 @@ Write counters count continuation update preparations (including no-ops or later
 failed attempts) and changed non-continuation updates, classified by the history
 seen under their mutation reservation. Scope counters count newly registered and
 explicitly released scopes, not a durable inventory. Reset does not enumerate
-released scopes. Release-error counts include generation conflicts and store
+released scopes. Expiry counters count scopes removed and whole history keys
+deleted by successfully committed lazy expiry batches, not current inventory.
+Release-error counts include generation conflicts and store
 release/reset errors; HTTP admission failures are logged separately. Errors are
 logged by buckyd and the client and leave cleanup state available for retry.
 Graphite's `storage` module reports deltas as `mutationProofTrackedWrites`,
 `mutationProofUntrackedWrites`, `mutationProofRegistered`, `mutationProofReleased`,
-`mutationProofResets`, and `mutationProofErrors`.
+`mutationProofExpiredScopes`, `mutationProofExpiredHistories`, `mutationProofResets`,
+and `mutationProofErrors`.

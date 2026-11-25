@@ -13,13 +13,19 @@ import (
 )
 
 func TestContinuationProofReleaseDifferential(t *testing.T) {
-	for _, reset := range []bool{false, true} {
-		t.Run(fmt.Sprint(reset), func(t *testing.T) {
+	for _, mode := range []string{"release", "reset", "ttl"} {
+		t.Run(fmt.Sprint(mode), func(t *testing.T) {
 			now := int64(1700000000)
+			proofFrom, proofUntil := now-100, now-50
 			clock := func() time.Time { return time.Unix(now, 0) }
 			var stores [2]*store.Store
 			for i := range stores {
-				db, err := store.Open(t.TempDir(), store.Options{ExactBlocks: true, Continuation: &ContinuationCodec{ReuseBlockKeys: true, DirectLateWrites: true}, Now: clock, SyncInterval: time.Hour, CacheSize: 1 << 20, MemTableSize: 1 << 20})
+				var ttl *time.Duration
+				if mode == "ttl" && i == 0 {
+					d := time.Second
+					ttl = &d
+				}
+				db, err := store.Open(t.TempDir(), store.Options{MutationProofScopeTTL: ttl, ExactBlocks: true, Continuation: &ContinuationCodec{ReuseBlockKeys: true, DirectLateWrites: true}, Now: clock, SyncInterval: time.Hour, CacheSize: 1 << 20, MemTableSize: 1 << 20})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -43,7 +49,7 @@ func TestContinuationProofReleaseDifferential(t *testing.T) {
 			}
 			proof := func(db *store.Store) string {
 				t.Helper()
-				p, _, err := db.MutationProof(t.Context(), "proof", now-100, now-50)
+				p, _, err := db.MutationProof(t.Context(), "proof", proofFrom, proofUntil)
 				if err != nil || p == "" {
 					t.Fatal(p, err)
 				}
@@ -51,7 +57,9 @@ func TestContinuationProofReleaseDifferential(t *testing.T) {
 			}
 			old := proof(stores[0])
 			proof(stores[1])
-			if reset {
+			if mode == "ttl" {
+				now += 2
+			} else if mode == "reset" {
 				if _, err := stores[0].ResetMutationProofs(t.Context()); err != nil {
 					t.Fatal(err)
 				}
@@ -91,6 +99,9 @@ func TestContinuationProofReleaseDifferential(t *testing.T) {
 				}
 			}
 			end := stores[0].ProofStats()
+			if mode == "ttl" && (end.ExpiredScopes != 1 || end.ExpiredHistories != 1) {
+				t.Fatal(end)
+			}
 			if end.TrackedWrites != stats.TrackedWrites || end.UntrackedWrites != stats.UntrackedWrites+4 {
 				t.Fatal("tracking did not stop", stats, end)
 			}

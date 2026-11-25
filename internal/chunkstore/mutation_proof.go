@@ -7,9 +7,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/cockroachdb/pebble"
 )
+
+const DefaultMutationProofScopeTTL = 72 * time.Hour
 
 const mutationHistoryLimit = 16
 const mutationScopeLimit = 16
@@ -27,6 +30,8 @@ type mutationScope struct {
 	From, Until int64
 	Revision    uint64
 	Reason      string
+	// LastRegistered is Unix nanoseconds; zero denotes a legacy registration.
+	LastRegistered int64 `json:",omitempty"`
 }
 
 type mutationHistory struct {
@@ -72,7 +77,7 @@ func readMutationHistory(reader pebble.Reader, m Metadata) (mutationHistory, err
 		return h, errors.New("invalid mutation history")
 	}
 	for _, scope := range h.Scopes {
-		if scope.From <= 0 || scope.Until <= scope.From || scope.Revision > h.Head {
+		if scope.From <= 0 || scope.Until <= scope.From || scope.Revision > h.Head || scope.LastRegistered < 0 {
 			return h, errors.New("invalid mutation scope")
 		}
 	}
@@ -91,10 +96,68 @@ func readMutationHistory(reader pebble.Reader, m Metadata) (mutationHistory, err
 	return h, nil
 }
 
+// proofExpiry accumulates only within one staged transaction. Publish its
+// counters after a successful commit; failed or retried batches count nothing.
+type proofExpiry struct{ scopes, histories uint64 }
+
+func (s *Store) recordProofExpiry(e proofExpiry) {
+	s.proofCounters.expiredScopes.Add(e.scopes)
+	s.proofCounters.expiredHistories.Add(e.histories)
+}
+
+// expireMutationScopes runs only while the caller owns the metric mutation
+// stripe/reservation. Changes share the point/revision batch, so no writer can
+// restore a saved scope after untracked writes. Legacy scopes get a full grace
+// period from their first touch. Wall-clock rollback delays expiry conservatively.
+func (s *Store) expireMutationScopes(b *pebble.Batch, m Metadata, h mutationHistory, expiry *proofExpiry) (mutationHistory, bool, error) {
+	if h.Version == 0 || s.mutationProofScopeTTL == 0 {
+		return h, false, nil
+	}
+	now := s.now()
+	dirty, expired := false, uint64(0)
+	kept := h.Scopes[:0]
+	for _, scope := range h.Scopes {
+		if scope.LastRegistered == 0 {
+			scope.LastRegistered = now.UnixNano()
+			dirty = true
+		} else if now.Sub(time.Unix(0, scope.LastRegistered)) > s.mutationProofScopeTTL {
+			expired++
+			dirty = true
+			continue
+		}
+		kept = append(kept, scope)
+	}
+	h.Scopes = kept
+	if !dirty && len(kept) != 0 {
+		return h, false, nil
+	}
+	if len(kept) == 0 {
+		if err := b.Delete(mutationKey(m), nil); err != nil {
+			return h, false, err
+		}
+		expiry.histories++
+		h = mutationHistory{}
+	} else {
+		data, err := json.Marshal(h)
+		if err != nil {
+			return h, false, err
+		}
+		if err := b.Set(mutationKey(m), data, nil); err != nil {
+			return h, false, err
+		}
+	}
+	expiry.scopes += expired
+	return h, true, nil
+}
+
 // stageMutationHistory is in the same atomic batch as the points and revision.
 // A missing revision in this chain is an UNKNOWN fence, never an empty delta.
-func (s *Store) stageMutationHistory(b *pebble.Batch, m Metadata, ranges []MutationRange, complete bool) error {
+func (s *Store) stageMutationHistory(b *pebble.Batch, m Metadata, ranges []MutationRange, complete bool, expiry *proofExpiry) error {
 	h, err := readMutationHistory(bReader(b, s.db), m)
+	if err != nil {
+		return err
+	}
+	h, _, err = s.expireMutationScopes(b, m, h, expiry)
 	if err != nil {
 		return err
 	}
@@ -206,8 +269,16 @@ func (s *Store) MutationProof(ctx context.Context, name string, from, until int6
 				}
 			}
 			exists := false
-			for _, scope := range h.Scopes {
+			now := s.now().UnixNano()
+			for i := range h.Scopes {
+				if h.Scopes[i].LastRegistered == 0 {
+					h.Scopes[i].LastRegistered = now
+					dirty = true
+				}
+				scope := &h.Scopes[i]
 				if scope.From == from && scope.Until == until {
+					scope.LastRegistered = now
+					dirty = true
 					exists = true
 				}
 			}
@@ -215,7 +286,7 @@ func (s *Store) MutationProof(ctx context.Context, name string, from, until int6
 				if len(h.Scopes) == mutationScopeLimit {
 					h.Scopes = h.Scopes[1:]
 				}
-				h.Scopes = append(h.Scopes, mutationScope{from, until, m.Revision, "scope registered"})
+				h.Scopes = append(h.Scopes, mutationScope{From: from, Until: until, Revision: m.Revision, Reason: "scope registered", LastRegistered: now})
 				dirty = true
 			}
 			if dirty {

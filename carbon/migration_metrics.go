@@ -196,6 +196,8 @@ var migrationMetricSpecs = func() []metricSpec {
 		counter("pebble_mutation_proof_untracked_writes_total", "Mutation proof untracked writes, since process start.", func(s *migrationSnapshot) float64 { return float64(s.stats.proof.UntrackedWrites) }),
 		counter("pebble_mutation_proof_scopes_registered_total", "Mutation proof scopes registered, since process start.", func(s *migrationSnapshot) float64 { return float64(s.stats.proof.Registered) }),
 		counter("pebble_mutation_proof_scopes_released_total", "Mutation proof scopes released, since process start.", func(s *migrationSnapshot) float64 { return float64(s.stats.proof.Released) }),
+		counter("pebble_mutation_proof_scopes_expired_total", "Mutation proof scopes expired for idleness, since process start.", func(s *migrationSnapshot) float64 { return float64(s.stats.proof.ExpiredScopes) }),
+		counter("pebble_mutation_proof_histories_expired_total", "Mutation proof history keys deleted for idle expiry, since process start.", func(s *migrationSnapshot) float64 { return float64(s.stats.proof.ExpiredHistories) }),
 		counter("pebble_mutation_proof_resets_total", "Mutation proof resets, since process start.", func(s *migrationSnapshot) float64 { return float64(s.stats.proof.Resets) }),
 		counter("pebble_mutation_proof_release_errors_total", "Mutation proof release errors, since process start.", func(s *migrationSnapshot) float64 { return float64(s.stats.proof.Errors) }),
 		counter("pebble_transfer_merge_appended_total", "Imported names already on this store merged by appending its newer points to the copy, without re-encoding the copy's history.", func(s *migrationSnapshot) float64 { return float64(s.stats.transferMergeAppended) }),

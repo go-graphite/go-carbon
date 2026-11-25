@@ -28,12 +28,12 @@ type ProofReleaseResult struct {
 
 type ProofResetReceipt struct{ Finished time.Time }
 
-type proofCounters struct{ tracked, untracked, registered, released, resets, errors atomic.Uint64 }
-type ProofStats struct{ TrackedWrites, UntrackedWrites, Registered, Released, Resets, Errors uint64 }
+type proofCounters struct{ tracked, untracked, registered, released, resets, errors, expiredScopes, expiredHistories atomic.Uint64 }
+type ProofStats struct{ TrackedWrites, UntrackedWrites, Registered, Released, Resets, Errors, ExpiredScopes, ExpiredHistories uint64 }
 
 func (s *Store) ProofStats() ProofStats {
 	c := &s.proofCounters
-	return ProofStats{c.tracked.Load(), c.untracked.Load(), c.registered.Load(), c.released.Load(), c.resets.Load(), c.errors.Load()}
+	return ProofStats{c.tracked.Load(), c.untracked.Load(), c.registered.Load(), c.released.Load(), c.resets.Load(), c.errors.Load(), c.expiredScopes.Load(), c.expiredHistories.Load()}
 }
 func (s *Store) recordProofWrite(tracked bool) {
 	if tracked {

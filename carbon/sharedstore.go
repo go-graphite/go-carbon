@@ -295,6 +295,9 @@ func validateStorageConfig(cfg *Config) error {
 	if budget := cfg.Whisper.StoreMaxOpenFiles; budget < 0 || budget > 1<<20 || budget > 0 && budget < 64 {
 		return errors.New("shared storage table-reader budget must be zero or 64..1048576")
 	}
+	if ttl := cfg.Whisper.MutationProofScopeTTL; ttl == nil || ttl.Value() < 0 {
+		return errors.New("whisper.mutation-proof-scope-ttl must be a non-negative duration")
+	}
 	if cfg.Whisper.StoreSyncInterval == nil || cfg.Whisper.StoreSyncInterval.Value() < 0 {
 		return errors.New("whisper.store-sync-interval must be a non-negative duration")
 	}
@@ -405,6 +408,7 @@ func storageSettingsChanged(old, next *Config) bool {
 		old.Whisper.StoreFetchSharedIterator != next.Whisper.StoreFetchSharedIterator ||
 		old.Whisper.StoreMetadataCacheSize != next.Whisper.StoreMetadataCacheSize ||
 		old.Whisper.StoreBytesPerSync != next.Whisper.StoreBytesPerSync ||
+		old.Whisper.MutationProofScopeTTL.Value() != next.Whisper.MutationProofScopeTTL.Value() ||
 		old.Whisper.StoreSyncInterval.Value() != next.Whisper.StoreSyncInterval.Value()
 }
 
@@ -478,6 +482,8 @@ func (s *storeStats) Stat(send helper.StatCallback) {
 	send("mutationProofUntrackedWrites", float64(stats.Proof.UntrackedWrites-s.prev.Proof.UntrackedWrites))
 	send("mutationProofRegistered", float64(stats.Proof.Registered-s.prev.Proof.Registered))
 	send("mutationProofReleased", float64(stats.Proof.Released-s.prev.Proof.Released))
+	send("mutationProofExpiredScopes", float64(stats.Proof.ExpiredScopes-s.prev.Proof.ExpiredScopes))
+	send("mutationProofExpiredHistories", float64(stats.Proof.ExpiredHistories-s.prev.Proof.ExpiredHistories))
 	send("mutationProofResets", float64(stats.Proof.Resets-s.prev.Proof.Resets))
 	send("mutationProofErrors", float64(stats.Proof.Errors-s.prev.Proof.Errors))
 	s.prev = stats

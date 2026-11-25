@@ -219,7 +219,8 @@ func (s *Store) commitUpdateAt(b *pebble.Batch, w *chunkWriter, m Metadata, acti
 	if err := w.commit(b); err != nil {
 		return err
 	}
-	if err := s.stageMutationHistory(b, m, w.mutationRanges, true); err != nil {
+	var expiry proofExpiry
+	if err := s.stageMutationHistory(b, m, w.mutationRanges, true, &expiry); err != nil {
 		return err
 	}
 	m.Revision++
@@ -230,6 +231,7 @@ func (s *Store) commitUpdateAt(b *pebble.Batch, w *chunkWriter, m Metadata, acti
 	if err := s.commit(b); err != nil {
 		return fmt.Errorf("commit update %s: %w", m.Name, err)
 	}
+	s.recordProofExpiry(expiry)
 	s.installState(nil, m)
 	s.materializations.Add(w.materialized)
 	s.operands.Add(w.operands)

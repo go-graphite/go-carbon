@@ -1166,6 +1166,7 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 			continuation = &whisperio.ContinuationCodec{ReuseBlockKeys: conf.Whisper.StoreReuseBlockKeys, DirectLateWrites: conf.Whisper.StoreOOODirectWrites, RangeReadsEnabled: func() bool { return app.readPolicyConfig.Load().Whisper.StoreRangeReads }, Reanchor: app.reanchorPacer}
 		}
 		compactionWarmup := conf.Whisper.StoreCompactionWarmup.Value()
+		proofTTL := conf.Whisper.MutationProofScopeTTL.Value()
 		app.MetricStore, err = app.openStoreWithHandoff(core, store.Options{
 			NativeExportConcurrency:   conf.nativeExportConcurrency(availableMemory),
 			NativeImportConcurrency:   conf.Whisper.StoreNativeImportConcurrency,
@@ -1189,6 +1190,7 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 			IngestParallel:            conf.Whisper.StoreMigrationIngestParallel,
 			CacheSize:                 conf.Whisper.StoreCacheSize, MemTableSize: conf.Whisper.StoreMemTableSize,
 
+			MutationProofScopeTTL:       &proofTTL,
 			SyncInterval:                conf.Whisper.StoreSyncInterval.Value(),
 			BlockLoadConcurrency:        conf.Whisper.StoreBlockLoadConcurrency,
 			ReadConcurrency:             conf.Whisper.StoreReadConcurrency,

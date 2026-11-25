@@ -133,6 +133,7 @@ func (s *Store) UpdateBatch(ctx context.Context, updates []MetricUpdate, mainten
 		p.batch = s.db.NewIndexedBatch()
 		states[name] = p
 	}
+	var expiry proofExpiry
 	changed := false
 	for _, update := range updates {
 		timer.Enter(stagetime.Route)
@@ -140,7 +141,7 @@ func (s *Store) UpdateBatch(ctx context.Context, updates []MetricUpdate, mainten
 		if p.view != nil {
 			p.state = p.view.final(p.meta)
 		}
-		m, view, sidecar, wrote, err := s.prepareContinuationUpdate(ctx, p.batch, p.meta, p.state, true, update.Points, -1, maintenance)
+		m, view, sidecar, wrote, err := s.prepareContinuationUpdate(ctx, p.batch, p.meta, p.state, true, update.Points, -1, maintenance, &expiry)
 		if err != nil {
 			return fmt.Errorf("prepare update %s: %w", update.Name, err)
 		}
@@ -166,6 +167,7 @@ func (s *Store) UpdateBatch(ctx context.Context, updates []MetricUpdate, mainten
 			return err
 		}
 	}
+	s.recordProofExpiry(expiry)
 	timer.Enter(stagetime.Publish)
 	for _, p := range states {
 		s.installState(p.view, p.meta)
