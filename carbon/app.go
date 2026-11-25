@@ -1265,7 +1265,9 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 				return nil, err
 			}
 		}
+		app.storeInfoMu.Lock()
 		app.expirationStats = &expirationStats{}
+		app.storeInfoMu.Unlock()
 	}
 
 	app.storeInfoMu.Lock()
@@ -1422,6 +1424,14 @@ func (app *App) configureCarbonserver(core *cache.Cache) (newMetricsQueue *helpe
 
 	carbonserver.RegisterInternalInfoHandler("cache", core.GetInfo)
 	carbonserver.RegisterInternalInfoHandler("config", app.configInfo)
+	carbonserver.RegisterInternalInfoHandler("quotaTrim", func() map[string]interface{} {
+		app.storeInfoMu.RLock()
+		defer app.storeInfoMu.RUnlock()
+		if app.expirationStats == nil {
+			return nil
+		}
+		return app.expirationStats.trim.Info()
+	})
 	if conf.Whisper.StorageBackend == "pebble-chunk" {
 		// Configure this callback before early handoff reads start. Its storage
 		// lease is installed only after Open validates the destination, and is

@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-graphite/go-carbon/carbonserver"
 	"github.com/go-graphite/go-carbon/helper"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/persister"
@@ -27,6 +28,7 @@ type expirationStore interface {
 }
 
 type expirationStats struct {
+	trim                                                       quotaTrimStats
 	examined, initialized, deleted, conflicts, pending, errors atomic.Uint64
 	duration, lastSuccess                                      atomic.Int64
 	wouldExpire, wouldBytes, guarded, limited                  atomic.Uint64
@@ -63,6 +65,14 @@ func (s *expirationStats) Stat(send helper.StatCallback) {
 // An expirer owns one immutable policy. Reload and shutdown join its worker
 // before replacing the policy or closing the store and catalog refresher.
 type metricExpirer struct {
+	trimRules  func() ([]carbonserver.QuotaTrimRule, error)
+	trimDryRun bool
+	// Quota candidates use the same worker queues and deletion contract as TTL
+	// expiration, with a separate receipt identity and no TTL eligibility check.
+	candidates    []store.Metadata
+	quotaPolicies map[string]string
+	onDeleted     func(store.Metadata)
+
 	db                                           expirationStore
 	rules                                        persister.WhisperExpirationRules
 	expiration                                   time.Duration
@@ -116,7 +126,7 @@ func loadExpirationConfig(cfg *Config) error {
 func (app *App) startExpiration() {
 	app.configureExpirationEvidence()
 	cfg := app.Config.Whisper
-	if app.MetricStore == nil || (cfg.StoreExpiration.Value() == 0 && !cfg.ExpirationRules.Enabled()) {
+	if app.MetricStore == nil || (cfg.StoreExpiration.Value() == 0 && !cfg.ExpirationRules.Enabled() && !cfg.QuotaTrimEnabled) {
 		return
 	}
 	core := app.Cache
@@ -131,8 +141,15 @@ func (app *App) startExpiration() {
 		restored:        app.storeRestoreDone,
 		maintenanceWait: app.storeMaintenance.wait,
 	}
+	if cfg.QuotaTrimEnabled {
+		r.trimRules = app.Carbonserver.QuotaTrimRules
+		r.trimDryRun = cfg.QuotaTrimDryRun
+	}
 	if app.metricStoreIndex != nil {
 		r.notify = app.metricStoreIndex.notify
+	} else if cfg.QuotaTrimEnabled && app.Carbonserver != nil {
+		// A completed file migration may have no dedicated catalog refresher.
+		r.notify = app.Carbonserver.RequestFileScan
 	}
 	r.start()
 	app.expirer = r
@@ -187,7 +204,7 @@ func (r *metricExpirer) close() {
 	<-r.done
 }
 
-func (r *metricExpirer) sweep(ctx context.Context) (err error) {
+func (r *metricExpirer) sweepExpiration(ctx context.Context) (err error) {
 	started := time.Now()
 	var examined, deleted uint64
 	var reports []expirationReport
@@ -289,6 +306,9 @@ func (r *metricExpirer) sweep(ctx context.Context) (err error) {
 						case outcome != nil:
 							err = errors.Join(err, outcome)
 						default:
+							if r.onDeleted != nil {
+								r.onDeleted(batch.metrics[j])
+							}
 							deleteCount.Add(1)
 							reserved.Add(1)
 							r.stats.deleted.Add(1)
@@ -364,7 +384,7 @@ func (r *metricExpirer) sweep(ctx context.Context) (err error) {
 		return nil
 	}
 	now := r.now()
-	err = store.EachPage(ctx, r.db.ListPage, "", expirationPageSize, func(page []store.Metadata) error {
+	err = r.eachCandidatePage(ctx, func(page []store.Metadata) error {
 		if err := scanBudget.wait(ctx, len(page)); err != nil {
 			return err
 		}
@@ -382,7 +402,7 @@ func (r *metricExpirer) sweep(ctx context.Context) (err error) {
 			if idx > 0 {
 				ttl = r.rules[idx-1].TTL()
 			}
-			if m.LastUpdate.IsZero() {
+			if r.candidates == nil && m.LastUpdate.IsZero() {
 				stats.kept.Add(1)
 				reports[idx].kept++
 				if !r.dryRun {
@@ -392,7 +412,7 @@ func (r *metricExpirer) sweep(ctx context.Context) (err error) {
 				}
 				continue
 			}
-			if ttl == 0 || now.Sub(m.LastUpdate) < ttl {
+			if r.candidates == nil && (ttl == 0 || now.Sub(m.LastUpdate) < ttl) {
 				stats.kept.Add(1)
 				reports[idx].kept++
 				continue
@@ -488,9 +508,12 @@ func (r *metricExpirer) deleteBatch(ctx context.Context, candidates []store.Meta
 		now := r.now()
 		for _, m := range candidates {
 			policy, ttl := expirationPolicyIdentity(r.rules, r.expiration, r.dryRun, m.Name, now)
-			if ttl > 0 {
-				receipts[m.Name] = store.ExpirationReceipt{Policy: policy, DeletedAt: now.Unix(), LastUpdate: m.LastUpdate.Unix()}
+			if q, ok := r.quotaPolicies[m.Name]; ok {
+				policy = q
+			} else if ttl <= 0 {
+				continue
 			}
+			receipts[m.Name] = store.ExpirationReceipt{Policy: policy, DeletedAt: now.Unix(), LastUpdate: m.LastUpdate.Unix()}
 		}
 		return batch.DeleteBatchWithExpirationReceipts(ctx, candidates, receipts)
 	}

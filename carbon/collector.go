@@ -119,6 +119,7 @@ func NewCollector(app *App) *Collector {
 	}
 	if app.expirationStats != nil {
 		c.stats = append(c.stats, moduleCallback("storage.expiration", app.expirationStats))
+		c.stats = append(c.stats, moduleCallback("quota.trim", &app.expirationStats.trim))
 	}
 
 	if app.Api != nil {
