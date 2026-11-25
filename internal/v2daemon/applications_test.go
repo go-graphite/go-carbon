@@ -131,7 +131,7 @@ func TestApplicationsRejectBeforeAdmission(t *testing.T) {
 		if err = p.AppendApplications(apps); err == nil {
 			t.Fatal("invalid group accepted")
 		}
-		if p.cursor != 0 || len(p.packets) != 0 || p.catalog.Count() != 0 {
+		if p.cursor != 0 || len(p.packets) != 0 || p.catalog != nil {
 			t.Fatal("invalid group partially admitted")
 		}
 		if err = p.Drain(); err == nil {

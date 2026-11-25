@@ -69,8 +69,13 @@ func (o *applicationOwner) register(name string, fp namefp.Fingerprint) (uint32,
 	if o.p.failed != nil {
 		return 0, o.p.failed
 	}
+	// Recovered producers open on first demand. Resolve persisted names before
+	// consulting today's admission policy, as an eagerly opened catalog did.
+	if err := o.p.openCatalog(); err != nil {
+		return 0, err
+	}
 	var id uint64
-	if o.p.catalog != nil && o.p.mirror == nil {
+	if o.p.mirror == nil {
 		id = o.p.catalog.Find(name)
 	}
 	if id != 0 {

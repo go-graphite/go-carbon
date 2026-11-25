@@ -2,6 +2,7 @@ package v2read
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -116,6 +117,26 @@ func TestL0RestartRendersMatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// A failed lazy catalog open must preserve this owner's durable head for
+	// the next restart, even if the failed engine then closes cleanly.
+	t.Run("catalog error preserves L0", func(t *testing.T) {
+		failed := t.TempDir()
+		if err := os.CopyFS(failed, os.DirFS(killed)); err != nil {
+			t.Fatal(err)
+		}
+		failedReader, failedEngine := open(failed)
+		wantErr := errors.New("catalog unavailable")
+		if err := failedEngine.LoadL0(func(int, *v2core.Batch) (bool, error) { return false, wantErr }); !errors.Is(err, wantErr) {
+			t.Fatalf("replay ignored catalog error: %v", err)
+		}
+		failedReader.Close()
+		if err := failedEngine.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if n := l0Files(failed); n != files {
+			t.Fatalf("catalog error consumed L0 files: got %d want %d", n, files)
+		}
+	})
 	reader, engine = open(killed)
 	// The daemon's durable catalogs register every handle before LoadL0.
 	for id, policy := range policies {
@@ -124,7 +145,7 @@ func TestL0RestartRendersMatch(t *testing.T) {
 		}
 	}
 	var loaded []uint64
-	if err := engine.LoadL0(func(_ int, b *v2core.Batch) bool { loaded = append(loaded, b.Order); return true }); err != nil {
+	if err := engine.LoadL0(func(_ int, b *v2core.Batch) (bool, error) { loaded = append(loaded, b.Order); return true, nil }); err != nil {
 		t.Fatal(err)
 	}
 	slices.Sort(loaded)

@@ -186,12 +186,15 @@ func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers 
 		// Continue each producer's order above every loaded application. An
 		// owner's frontier is the last order of each producer it sealed.
 		frontiers := e.DurableFrontiers()
-		err := e.LoadL0(func(owner int, b *v2core.Batch) bool {
+		err := e.LoadL0(func(owner int, b *v2core.Batch) (bool, error) {
 			producer := int((b.ID - 1) % uint64(c.Producers))
 			p := s.Producers[producer]
 			p.applyOrder = max(p.applyOrder, b.Order)
 			p.cursor = p.applyOrder
-			return b.Order > frontiers[owner][producer]
+			if b.Order <= frontiers[owner][producer] {
+				return false, nil
+			}
+			return true, p.openCatalog()
 		})
 		if err != nil {
 			_ = s.Close()
@@ -204,7 +207,7 @@ func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers 
 }
 
 // openCatalog runs on the producer's serial caller, on recovery only if a
-// journal tail needs names. Core parts remain authoritative for sealed data.
+// live L0 data needs names. Core parts remain authoritative for sealed data.
 func (p *Producer) openCatalog() error {
 	if p.catalog != nil {
 		return nil

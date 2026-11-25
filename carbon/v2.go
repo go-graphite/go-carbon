@@ -360,7 +360,7 @@ func (app *App) startV2() error {
 		v.metrics.unregister = func() { app.PromRegisterer.Unregister(v.metrics) }
 	}
 	if mode != v2Shadow {
-		if err = app.Carbonserver.SetV2Catalog(&v.catalog); err != nil {
+		if err = app.Carbonserver.SetV2Catalog(&v.catalog, r.AwaitHydration); err != nil {
 			return err
 		}
 	}

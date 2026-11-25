@@ -199,8 +199,8 @@ func applicationHeader(record []byte) (cursor, n, first, last uint64, err error)
 // every record) and start this build on the sealed store.
 var ErrLegacyJournal = errors.New("producer journal has unsealed records: stop the previous build cleanly before starting with L0 run files")
 
-// recoverL0 opens the producer's catalog, which registers every handle the L0
-// files reference, and continues its order above the sealed frontier. A
+// recoverL0 validates legacy journal coverage and continues the producer order
+// above the sealed frontier. L0 replay or first intake opens its catalog. A
 // fully sealed legacy journal stays in place, read-only: its last record
 // seeds the order on every start, because the frontier counts points, not
 // orders, until the first L0 seal.
@@ -227,9 +227,6 @@ func (p *Producer) recoverL0(dir string) error {
 		break
 	}
 	p.journalDir = dir
-	if err := p.openCatalog(); err != nil {
-		return err
-	}
 	for _, frontier := range p.engine.DurableFrontiers() {
 		p.applyOrder = max(p.applyOrder, frontier[p.index])
 	}
