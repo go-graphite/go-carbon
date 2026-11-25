@@ -196,6 +196,8 @@ func TestSharedStorageConfigRejectsUnsupportedPolicies(t *testing.T) {
 		{"invalid compaction rate", func(c *Config) { c.Whisper.StoreCompactionRate = -2 }},
 		{"low compaction headroom", func(c *Config) { c.Whisper.StoreCompactionHeadroom = 0.5 }},
 		{"high compaction headroom", func(c *Config) { c.Whisper.StoreCompactionHeadroom = 4.5 }},
+		{"missing proof TTL", func(c *Config) { c.Whisper.MutationProofScopeTTL = nil }},
+		{"negative proof TTL", func(c *Config) { c.Whisper.MutationProofScopeTTL = &Duration{-time.Second} }},
 		{"missing compaction warmup", func(c *Config) { c.Whisper.StoreCompactionWarmup = nil }},
 		{"negative compaction warmup", func(c *Config) { c.Whisper.StoreCompactionWarmup = &Duration{-time.Second} }},
 		{"long compaction warmup", func(c *Config) { c.Whisper.StoreCompactionWarmup = &Duration{25 * time.Hour} }},
@@ -686,5 +688,29 @@ func TestDumpStopFlushesSharedStoreEarly(t *testing.T) {
 	}
 	if stats := db.Stats(); stats.WALBytes > 1<<20 {
 		t.Fatal("successor replays a WAL", stats.WALBytes)
+	}
+}
+
+func TestMutationProofScopeTTLConfig(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  time.Duration
+	}{
+		{"", 72 * time.Hour}, {`mutation-proof-scope-ttl = "0s"`, 0}, {`mutation-proof-scope-ttl = "12h"`, 12 * time.Hour},
+	} {
+		cfg := NewConfig()
+		if _, err := toml.Decode("[whisper]\n"+tc.value, cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Whisper.MutationProofScopeTTL.Value() != tc.want {
+			t.Fatal(cfg.Whisper.MutationProofScopeTTL)
+		}
+		next := NewConfig()
+		next.Whisper.StorageBackend = "pebble-chunk"
+		cfg.Whisper.StorageBackend = "pebble-chunk"
+		next.Whisper.MutationProofScopeTTL = &Duration{tc.want + time.Second}
+		if !storageSettingsChanged(cfg, next) {
+			t.Fatal("TTL change did not require reopen")
+		}
 	}
 }

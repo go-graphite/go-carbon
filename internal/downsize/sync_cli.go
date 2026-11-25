@@ -76,6 +76,7 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	resume := flags.String("resume", "", "resume from the saved configuration in this state directory; only operational scheduling, timeout, streams, rate, cache-threshold and READY inputs may override it")
 	flags.StringVar(&c.jwtSecret, "jwt-secret", "", "buckyd JWT signing secret file; tokens refresh automatically before expiry (default: [buckyd] auth-jwt-secret-file from --config, else "+hostJWTSecretPath+")")
 	flags.StringVar(&c.goCarbonConfig, "config", "", "local go-carbon config read for the default --jwt-secret (default: the -config of the running go-carbon, else "+defaultGoCarbonConfig+")")
+	flags.BoolVar(&c.sync.noReleaseProofs, "no-release-proofs", false, "retain mutation-proof scopes after terminal closeout")
 	flags.Bool("ready", false, "run the final READY attestation (off by default)")
 	c.copy.streams, c.copy.progressInterval = defaultSyncStreams, defaultSyncProgress
 	flags.Lookup("streams").DefValue, flags.Lookup("progress-interval").DefValue = strconv.Itoa(defaultSyncStreams), defaultSyncProgress.String()
@@ -335,6 +336,11 @@ func SyncMain(ctx context.Context, args []string) error {
 	limiter := &syncRateLimit{bytesPerSecond: c.rate}
 	c.copy.rate, c.live.rate = limiter, limiter
 	backend := newSyncLiveBackend(c.live)
+	if !c.sync.noReleaseProofs {
+		if pending, cleanupErr := resumeProofCloseout(ctx, c.sync, backend); pending || cleanupErr != nil {
+			return cleanupErr
+		}
+	}
 	if c.health.enabled {
 		backend.health = newTargetHealthGate(c.sync.to, c.health.high, c.health.low)
 		c.copy.health = backend.health
@@ -411,6 +417,20 @@ func SyncMain(ctx context.Context, args []string) error {
 		event("effective_config", map[string]any{"effective": c.sync.policy})
 		return nil
 	}, func() error { return c.run(ctx, backend) })
+	terminal := err == nil
+	if errors.Is(err, ErrSyncQuarantined) {
+		var report readyReport
+		terminal = readReadyObservationJSON(filepath.Join(c.sync.state, "ready.json"), &report) == nil && report.Verdict == "READY_EXCEPT"
+	}
+	if terminal && !c.sync.noVerify && !c.sync.noReleaseProofs {
+		if e := beginProofCloseout(c.sync, errors.Is(err, ErrSyncQuarantined)); e != nil {
+			return e
+		}
+		_, e := resumeProofCloseout(ctx, c.sync, backend)
+		if e != nil {
+			return e
+		}
+	}
 	event("sync_io", map[string]any{"timings": backend.syncTimings()})
 	if errors.Is(err, ErrSyncQuarantined) {
 		return err

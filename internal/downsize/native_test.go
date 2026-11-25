@@ -30,9 +30,13 @@ func nativeControllerStore(t *testing.T) *store.Store {
 	})
 	return s
 }
-func nativeControllerService(t *testing.T, s *store.Store) http.Handler {
+func nativeControllerService(t *testing.T, s *store.Store, secretFile ...string) http.Handler {
 	t.Helper()
-	service, err := buckyd.New(buckyd.Config{TmpDir: t.TempDir(), MaxTransfers: 2, MaxBodyBytes: 1 << 20, TransferSources: []string{"127.0.0.1"}}, s)
+	config := buckyd.Config{TmpDir: t.TempDir(), MaxTransfers: 2, MaxBodyBytes: 1 << 20, TransferSources: []string{"127.0.0.1"}}
+	if len(secretFile) > 0 {
+		config.JWTSecretFile = secretFile[0]
+	}
+	service, err := buckyd.New(config, s)
 	if err != nil {
 		t.Fatal(err)
 	}

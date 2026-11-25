@@ -577,6 +577,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/expiration/evidence", s.expirationEvidence)
 	mux.HandleFunc("/v1/maintenance/archive-anchors", s.archiveAnchors)
 	mux.HandleFunc("/v1/maintenance/sidecars", s.sidecars)
+	mux.HandleFunc("/v1/maintenance/mutation-proofs", s.mutationProofs)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		phasecpu.Set(phasecpu.Buckyd)
 		defer phasecpu.Set(phasecpu.Other)

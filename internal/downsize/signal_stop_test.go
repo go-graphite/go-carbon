@@ -49,6 +49,11 @@ func TestStorectlSignalStopAndResume(t *testing.T) {
 				// Sibling subprocesses also own live journal locks: launch one
 				// signal/resume scenario at a time.
 				source, target := nativeControllerStore(t), nativeControllerStore(t)
+				// Terminal closeout uses the authenticated maintenance API.
+				secret := filepath.Join(t.TempDir(), "secret")
+				if err := os.WriteFile(secret, []byte(strings.Repeat("s", 32)), 0600); err != nil {
+					t.Fatal(err)
+				}
 				names := []string{"stop.a", "stop.b", "stop.c", "stop.d"}
 				for i, name := range names {
 					addPoints(t, source, name, math.Copysign(float64(i), -1))
@@ -62,7 +67,7 @@ func TestStorectlSignalStopAndResume(t *testing.T) {
 					default:
 					}
 				}
-				handler := nativeControllerService(t, target)
+				handler := nativeControllerService(t, target, secret)
 				var pulls atomic.Int64
 				survivor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					if stopping.Load() {
@@ -99,7 +104,7 @@ func TestStorectlSignalStopAndResume(t *testing.T) {
 					handler.ServeHTTP(w, r)
 				}))
 				defer survivor.Close()
-				donor := httptest.NewServer(nativeControllerService(t, source))
+				donor := httptest.NewServer(nativeControllerService(t, source, secret))
 				defer donor.Close()
 				carbon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					if r.URL.Path != "/info/" {
@@ -123,10 +128,6 @@ func TestStorectlSignalStopAndResume(t *testing.T) {
 				defer carbon.Close()
 				u, _ := url.Parse(carbon.URL)
 				state := filepath.Join(t.TempDir(), "state")
-				secret := filepath.Join(t.TempDir(), "secret")
-				if err := os.WriteFile(secret, []byte(strings.Repeat("s", 32)), 0600); err != nil {
-					t.Fatal(err)
-				}
 				args := []string{"sync", "--source", donor.URL, "--to", survivor.URL, "--state", state,
 					"--window", fmt.Sprintf("gap:%d:%d", testMetricNow-20, testMetricNow), "--no-full-history", "--settle=0s",
 					"--include-short-retention", "--streams=1", "--verify-batch=2", "--jwt-secret", secret,

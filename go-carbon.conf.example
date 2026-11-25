@@ -406,6 +406,10 @@ store-max-open-files = 0
 # since the last successful sync; sync delays can extend the interval.
 # Requires restart. Ignored by the files backend.
 store-sync-interval = "1s"
+
+# Proof scopes idle longer than this expire on the next write. Repeated proof-v2
+# requests renew them. 0s disables expiry; changing this requires restart.
+mutation-proof-scope-ttl = "72h"
 # Ready metrics to combine in a shared-store commit (1..8). One retains the
 # normal path. Eight amortizes synchronous WAL commits; benchmark interval-
 # synced workloads before enabling it, as per-key work still dominates.

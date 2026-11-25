@@ -58,7 +58,8 @@ func (s *Store) updateContinuationFrom(ctx context.Context, m Metadata, state *m
 	}
 	batch := s.db.NewIndexedBatch()
 	defer batch.Close()
-	m, view, sidecar, changed, err := s.prepareContinuationUpdate(ctx, batch, m, state, cache, input, retention, maintenance)
+	var expiry proofExpiry
+	m, view, sidecar, changed, err := s.prepareContinuationUpdate(ctx, batch, m, state, cache, input, retention, maintenance, &expiry)
 	if err != nil {
 		return err
 	}
@@ -68,6 +69,7 @@ func (s *Store) updateContinuationFrom(ctx context.Context, m Metadata, state *m
 			return err
 		}
 	}
+	s.recordProofExpiry(expiry)
 	stagetime.FromContext(ctx).Enter(stagetime.Publish)
 	if cache {
 		s.installState(view, m)
@@ -77,13 +79,18 @@ func (s *Store) updateContinuationFrom(ctx context.Context, m Metadata, state *m
 
 // prepareContinuationUpdate stages one metric without publishing its cache
 // state. The caller reserves its name until the enclosing batch commits.
-func (s *Store) prepareContinuationUpdate(ctx context.Context, batch *pebble.Batch, m Metadata, state *metricState, cache bool, input []Point, retention int, maintenance *ContinuationMaintenance) (Metadata, *stateView, *SidecarSummary, bool, error) {
+func (s *Store) prepareContinuationUpdate(ctx context.Context, batch *pebble.Batch, m Metadata, state *metricState, cache bool, input []Point, retention int, maintenance *ContinuationMaintenance, expiry *proofExpiry) (Metadata, *stateView, *SidecarSummary, bool, error) {
 	io := s.newContinuationIO(ctx, batch, batch, m)
 	history, err := readMutationHistory(batch, m)
 	if err != nil {
 		return m, nil, nil, false, err
 	}
+	history, historyChanged, err := s.expireMutationScopes(batch, m, history, expiry)
+	if err != nil {
+		return m, nil, nil, false, err
+	}
 	io.mutationTracked = history.Version == 1
+	s.recordProofWrite(io.mutationTracked)
 	for _, scope := range history.Scopes {
 		io.mutationWindows = append(io.mutationWindows, MutationRange{From: scope.From, Until: scope.Until})
 	}
@@ -114,7 +121,7 @@ func (s *Store) prepareContinuationUpdate(ctx context.Context, batch *pebble.Bat
 			return m, nil, nil, false, err
 		}
 	}
-	return m, io.state, io.sidecar, io.changed, nil
+	return m, io.state, io.sidecar, io.changed || historyChanged, nil
 }
 
 func (s *Store) continuationSnapshot(ctx context.Context, reader pebble.Reader, m Metadata) (Snapshot, error) {

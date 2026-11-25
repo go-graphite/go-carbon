@@ -1141,3 +1141,42 @@ READY still requires all windows closed with receipts, an explicitly complete
 ledger, and the independent all-donor proof and read-back. That final proof also
 covers names created after the gap inventory snapshot. Keep the existing state
 directory and provide the updated `--ready-block` when end evidence arrives.
+
+### Retire verification bookkeeping
+
+Successful `storectl sync` terminal closeout now releases window mutation-proof
+scopes on the target and every donor, including independent READY/recovery
+holders. The default is on; `--no-release-proofs` retains scopes for overlapping
+verification jobs or older servers. Copy completion, intermediate rounds and
+process exit do not release scopes. A failed comparison retains them. A terminal
+`READY_EXCEPT` keeps its exclusions and verdict.
+
+`STATE/proof-closeout.json` durably records terminal closeout and cleanup cursors.
+If cleanup fails, keep the state/catalogues and run `storectl sync --resume STATE`
+to finish the pending cleanup. This invocation completes that historical closeout
+without publishing a new attestation. Later normal passes still validate their
+saved frontier and recompare changed names. Pages with durable acknowledgements
+are skipped; requests with lost replies can be retried idempotently. State is
+retained until an operator removes it after successful cleanup.
+
+For a host whose old sync state has already been removed:
+
+```sh
+# Prints the exact POST URL and empty request body; makes no network request.
+storectl proof-reset --host http://host-a:4242
+
+# Explicitly apply on this one host, without restarting it.
+storectl proof-reset --host http://host-a:4242 --jwt-secret ./jwt-secret --apply
+# Or use an existing root/update JWT from BUCKYD_TOKEN (custom --token-env allowed).
+storectl proof-reset --host http://host-a:4242 --apply
+```
+
+`proof-reset` also accepts `--config FILE` for the usual signing-secret lookup and
+`--timeout 10m`. Dry-run is the default and needs no credential file. Apply
+requires an authenticated root/update token and returns a UTC completion receipt.
+Coordinate active local and remote verification before resetting: scopes have no
+owners, so release can conservatively invalidate other consumers' proof reuse.
+Reset changes only proof history, not points, receipts or lineage. No rollback is
+needed; the next verification registers fresh scopes. See
+[window mutation proofs](../../doc/window-mutation-proofs.md#explicit-retirement)
+for the per-name API, fencing protocol and counters.

@@ -91,6 +91,7 @@ type whisperConfig struct {
 	StoreLBaseMaxBytes           int64     `toml:"store-lbase-max-bytes"`
 	StoreMemTableMaxUnflushed    uint64    `toml:"store-memtable-max-unflushed-bytes"`
 	StoreMaxOpenFiles            int       `toml:"store-max-open-files"`
+	MutationProofScopeTTL        *Duration `toml:"mutation-proof-scope-ttl"`
 	StoreSyncInterval            *Duration `toml:"store-sync-interval"`
 	StoreUpdateBatchSize         int       `toml:"store-update-batch-size"`
 	StoreEncoding                string    `toml:"store-encoding"`
@@ -493,6 +494,7 @@ func NewConfig() *Config {
 			StorageBackend:               "files",
 			StoreCacheSize:               256 << 20,
 			StoreMemTableSize:            64 << 20,
+			MutationProofScopeTTL:        &Duration{store.DefaultMutationProofScopeTTL},
 			StoreSyncInterval:            &Duration{time.Second},
 			StoreCompactionHeadroom:      2,
 			StoreCompactionDebtBypass:    true,

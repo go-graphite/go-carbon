@@ -47,6 +47,10 @@ const (
 )
 
 type Options struct {
+	// MutationProofScopeTTL defaults to 72h when nil; zero disables lazy idle
+	// expiry. Negative durations are rejected. Changes require reopening.
+	MutationProofScopeTTL *time.Duration
+
 	// ReadOnly opens existing storage without any filesystem mutations. It does
 	// not upgrade formats, move WALs, save checkpoints or run maintenance.
 	// The directory must not be open by another store; this is an offline view.
@@ -238,8 +242,9 @@ func (o Options) WithFS(fs vfs.FS) Options {
 }
 
 type Store struct {
-	proofLineage proofLineage
-	readOnly     bool
+	mutationProofScopeTTL time.Duration
+	proofLineage          proofLineage
+	readOnly              bool
 
 	readSlots             *fifo.Semaphore
 	readQueued            atomic.Int64
@@ -252,6 +257,7 @@ type Store struct {
 	readParents           [32]context.Context
 	readParentNext        atomic.Uint64
 	nativeCounters        nativeCounters
+	proofCounters         proofCounters
 	nativeReady           func() error // installed before listeners; native/shared ownership only
 	nativePendingSnapshot func() (map[string]struct{}, error)
 	nativePendingCheck    func(string) bool
@@ -409,6 +415,13 @@ var storeComparer = func() *pebble.Comparer {
 // Open accepts only a new directory or an explicitly identified chunk store.
 // A legacy Pebble directory is rejected before Pebble can modify its manifest.
 func Open(dir string, options Options) (*Store, error) {
+	proofTTL := DefaultMutationProofScopeTTL
+	if options.MutationProofScopeTTL != nil {
+		proofTTL = *options.MutationProofScopeTTL
+	}
+	if proofTTL < 0 {
+		return nil, errors.New("mutation proof scope TTL must be non-negative")
+	}
 	if options.NativeExportConcurrency == 0 {
 		options.NativeExportConcurrency = AutoNativeExportConcurrency()
 	}
@@ -536,6 +549,7 @@ func Open(dir string, options Options) (*Store, error) {
 		options.MemTableSize = 64 << 20
 	}
 	s := &Store{readOnly: options.ReadOnly, readSlots: fifo.NewSemaphore(readConcurrency(options.ReadConcurrency)), now: options.Now, writeOptions: pebble.Sync, exactBlocks: options.ExactBlocks, fileReadMu: new([32768]sync.RWMutex), deferredSync: deferredSync, fsStats: counting, compactionPacing: pacing}
+	s.mutationProofScopeTTL = proofTTL
 	s.initReadContexts()
 	s.readDone = make(chan struct{})
 	s.maintenanceWait = options.MaintenanceWait
@@ -1340,6 +1354,7 @@ type CompactionKinds struct {
 }
 
 type Stats struct {
+	Proof                                                   ProofStats
 	BlockLoadCapacity, BlockLoadsInProgress, BlockLoadWaits int64
 	ReadCapacity, ReadsInProgress, ReadsQueued              int64
 
@@ -1486,6 +1501,7 @@ func (s *Store) statsFrom(m *pebble.Metrics, pacing compactionPacingStats, cold 
 	stats.IngestTables, stats.IngestEntries, stats.IngestBytes = s.ingestStats.tables.Load(), s.ingestStats.entries.Load(), s.ingestStats.bytes.Load()
 	stats.IngestL0Bytes, stats.IngestMemtableOverlaps = s.ingestStats.l0Bytes.Load(), s.ingestStats.memtableOverlaps.Load()
 	stats.TransferBatchCommits, stats.TransferBatchEntries, stats.TransferBatchBytes = s.transferBatchStats.commits.Load(), s.transferBatchStats.entries.Load(), s.transferBatchStats.bytes.Load()
+	stats.Proof = s.ProofStats()
 	stats.TransferMergeAppended, stats.TransferMergeAppendedClassic, stats.TransferMergeFallbacks = s.transferMergeStats.snapshot()
 	stats.ContinuationRangeDeletes = continuationRangeDeletes.Load()
 	stats.CompactionKinds = CompactionKinds{Default: uint64(m.Compact.DefaultCount), DeleteOnly: uint64(m.Compact.DeleteOnlyCount), ElisionOnly: uint64(m.Compact.ElisionOnlyCount),
