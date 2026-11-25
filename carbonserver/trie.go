@@ -1824,7 +1824,7 @@ func (q *QuotaUsage) String() string {
 //
 // this method is not goroutine-safe.
 func (ti *trieIndex) applyQuotas(resetFrequency time.Duration, quotas ...*Quota) (*throughputQuotaManager, error) {
-	pending, depth, err := ti.resolveQuotas(quotas)
+	pending, _, err := ti.resolveQuotas(quotas)
 	if err != nil {
 		return nil, err
 	}
@@ -1854,6 +1854,7 @@ func (ti *trieIndex) applyQuotas(resetFrequency time.Duration, quotas ...*Quota)
 		}
 	}
 	ti.quotaNodes = make(map[string]*dirMeta, len(pending))
+	depth := 0
 	for path, change := range pending {
 		meta, _ := change.node.meta.Load().(*dirMeta)
 		if usage, ok := savedUsage[path]; ok {
@@ -1877,13 +1878,18 @@ func (ti *trieIndex) applyQuotas(resetFrequency time.Duration, quotas ...*Quota)
 		} else {
 			meta.update(change.quota)
 		}
-		ti.throughputs.store(path, newThroughputUsagePerNamespace(ti.root.gen, change.quota, meta.usage))
+		// Disabled throughput controls neither enforce nor emit throughput stats.
+		// Keep explicit throughput=max controls: they still report usage.
+		if change.quota.Throughput > 0 {
+			ti.throughputs.store(path, newThroughputUsagePerNamespace(ti.root.gen, change.quota, meta.usage))
+			depth = max(depth, strings.Count(path, "."))
+		}
 		ti.quotaNodes[path] = meta
 	}
 	// store retains the current throughput recorder for unchanged namespaces.
-	// Removed rules must stop enforcing immediately, even without a new scan.
+	// Removed or disabled controls must stop tracking immediately, even without a new scan.
 	ti.throughputs.entries.Range(func(k, _ interface{}) bool {
-		if _, exists := pending[k.(string)]; !exists {
+		if change, exists := pending[k.(string)]; !exists || change.quota.Throughput <= 0 {
 			ti.throughputs.entries.Delete(k)
 		}
 		return true

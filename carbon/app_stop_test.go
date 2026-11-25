@@ -156,7 +156,7 @@ func TestReloadAndCollectorDeadlock(t *testing.T) {
 					close(collecting)
 					// Stop must join a real collection under the reload lock.
 					<-exit
-					collector.collect()
+					collector.collect(nil)
 				})
 				<-collecting
 				err := app.ReloadConfig()

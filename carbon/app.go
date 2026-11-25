@@ -100,6 +100,7 @@ type App struct {
 	PromRegisterer         prometheus.Registerer
 	PromRegistry           *prometheus.Registry
 	configUnknownKeys      prometheus.Gauge
+	internalStatsDropped   prometheus.Counter
 	mallocCollector        *malloc.Collector
 	mallocTrimmer          *malloc.Trimmer
 	mallocTrimEvery        time.Duration

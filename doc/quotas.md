@@ -49,6 +49,13 @@ If `carbonserver.quota-usage-report-frequency` is 5 minute, then `throughput = 6
 
 For `throughput` control, both new and old metrics might be dropped, depending their arriving order.
 
+Only rules with a positive `throughput` value track accepted points. Use
+`throughput = max` to report throughput usage without enforcing a finite limit.
+Omitted, zero, or negative values produce no throughput quota/usage series and
+add no per-point throughput accounting. Enabling throughput on such a rule
+starts a fresh usage window; changing between positive values (including `max`)
+preserves the current window.
+
 ## Special values
 
 The control values can be set to `max`/`maximum`, which is set to max int64 (9,223,372,036,854,775,807), and it practically means no limit.
@@ -69,6 +76,16 @@ carbon.agents.{host}.throttle.app
 The `carbon.agents.{host}` is from config `common.graph-prefix`.
 
 We can also define a prefix for the generated path, using `stat-metric-prefix` for each matched patterns.
+
+The internal stats reporter drains large quota reports through its bounded
+4,096-point send queue, waiting for the sender when necessary. One shared
+5-second budget bounds queue waits for the whole report; shutdown cancels those
+waits. This runs in the reporter goroutine, independently of metric ingestion.
+An unavailable or slow stats endpoint can still cause drops after the budget is
+exhausted. `internal_stats_dropped_total` counts these points on the Prometheus
+endpoint, independently of the stats queue and logging level, and survives
+collector recreation on configuration reload. Existing stat names, values,
+timestamps, and endpoint routing are unchanged.
 
 ## How to enable Quotas
 
@@ -137,8 +154,8 @@ Once quota support is enabled at startup, send `SIGHUP` to reload the quota file
 without restarting go-carbon. The existing index and listeners stay available.
 Rules are applied by the index updater; the log message `quota rules reloaded`
 confirms application. Changes do not reset throughput consumption for namespaces
-that remain configured. Removing a rule removes its limits, and an empty quota
-file clears all rules. Invalid files or glob patterns retain the previous rules.
+whose throughput control remains positive. Removing a rule removes its limits,
+and an empty quota file clears all rules. Invalid files or glob patterns retain the previous rules.
 Newly matched namespaces use their existing indexed storage usage immediately.
 Rule application does not wait for a disk scan. Quota/usage metrics still follow
 `carbonserver.quota-usage-report-frequency`, independently of the polling interval.

@@ -1,6 +1,7 @@
 package carbon
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/url"
@@ -12,9 +13,13 @@ import (
 	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/lomik/zapwriter"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
-type statFunc func()
+// A report may wait for the sender, but never holds up ingestion.
+const statReportSendTimeout = 5 * time.Second
+
+type statFunc func(context.Context, <-chan bool)
 
 type statModule interface {
 	Stat(send helper.StatCallback)
@@ -27,7 +32,8 @@ type Collector struct {
 	endpoint       string
 	data           chan *points.Points
 	stats          []statFunc
-	logger         *zap.Logger //nolint:unused
+	logger         *zap.Logger
+	dropped        prometheus.Counter
 }
 
 func RuntimeStat(send helper.StatCallback) {
@@ -38,6 +44,17 @@ func RuntimeStat(send helper.StatCallback) {
 
 func NewCollector(app *App) *Collector {
 	// app locked by caller
+	// The collector is recreated on reload; keep the counter on App so it
+	// remains cumulative and does not register twice. Scraping bypasses data.
+	if app.internalStatsDropped == nil {
+		app.internalStatsDropped = prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "internal_stats_dropped_total",
+			Help: "Internal stat points dropped because the collector send queue is full.",
+		})
+		if app.PromRegisterer != nil {
+			app.PromRegisterer.MustRegister(app.internalStatsDropped)
+		}
+	}
 
 	c := &Collector{
 		graphPrefix:    app.Config.Common.GraphPrefix,
@@ -45,6 +62,7 @@ func NewCollector(app *App) *Collector {
 		data:           make(chan *points.Points, 4096),
 		endpoint:       app.Config.Common.MetricEndpoint,
 		stats:          make([]statFunc, 0),
+		dropped:        app.internalStatsDropped,
 	}
 
 	c.Start()
@@ -58,22 +76,11 @@ func NewCollector(app *App) *Collector {
 	}
 
 	logger = logger.With(zap.String("endpoint", c.endpoint))
+	c.logger = logger
 
 	c.startSender(app.Cache.Add, endpoint, logger)
 
-	sendCallback := func(moduleName string) func(metric string, value float64) {
-		return func(metric string, value float64) {
-			key := fmt.Sprintf("%s.%s.%s", c.graphPrefix, moduleName, metric)
-			logger.Info("collect", zap.String("metric", key), zap.Float64("value", value))
-			select {
-			case c.data <- points.NowPoint(key, value):
-				// pass
-			default:
-				logger.Warn("send queue is full. metric dropped",
-					zap.String("key", key), zap.Float64("value", value))
-			}
-		}
-	}
+	sendCallback := c.statCallback
 
 	// Modules may have counted input throughout a long startup (or reload).
 	// Establish their baseline without publishing that unbounded window as one
@@ -81,13 +88,13 @@ func NewCollector(app *App) *Collector {
 	discardStat := func(string, float64) {}
 	moduleCallback := func(moduleName string, moduleObj statModule) statFunc {
 		moduleObj.Stat(discardStat)
-		return func() {
-			moduleObj.Stat(sendCallback(moduleName))
+		return func(ctx context.Context, exit <-chan bool) {
+			moduleObj.Stat(sendCallback(ctx, exit, moduleName))
 		}
 	}
 
-	c.stats = append(c.stats, func() {
-		RuntimeStat(sendCallback("runtime"))
+	c.stats = append(c.stats, func(ctx context.Context, exit <-chan bool) {
+		RuntimeStat(sendCallback(ctx, exit, "runtime"))
 	})
 
 	if app.SocketStats != nil {
@@ -135,9 +142,36 @@ func NewCollector(app *App) *Collector {
 	return c
 }
 
-func (c *Collector) collect() {
+func (c *Collector) statCallback(ctx context.Context, exit <-chan bool, moduleName string) helper.StatCallback {
+	return func(metric string, value float64) {
+		key := fmt.Sprintf("%s.%s.%s", c.graphPrefix, moduleName, metric)
+		c.logger.Info("collect", zap.String("metric", key), zap.Float64("value", value))
+		p := points.NowPoint(key, value)
+		select {
+		case c.data <- p:
+			return
+		default:
+		}
+		// Share one deadline across the entire report, rather than waiting
+		// once per metric. A healthy sender can drain arbitrarily large quota
+		// bursts through the fixed-size queue. Shutdown cancels the wait.
+		select {
+		case c.data <- p:
+			return
+		case <-ctx.Done():
+		case <-exit:
+		}
+		c.dropped.Inc()
+		c.logger.Warn("send queue is full. metric dropped",
+			zap.String("key", key), zap.Float64("value", value))
+	}
+}
+
+func (c *Collector) collect(exit <-chan bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), statReportSendTimeout)
+	defer cancel()
 	for _, stat := range c.stats {
-		stat()
+		stat(ctx, exit)
 	}
 }
 
@@ -233,7 +267,7 @@ func (c *Collector) run(exit chan bool) {
 		case <-exit:
 			return
 		case <-ticker.C:
-			c.collect()
+			c.collect(exit)
 		}
 	}
 }

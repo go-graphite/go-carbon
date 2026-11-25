@@ -41,7 +41,7 @@ func TestCollectorFirstInterval(t *testing.T) {
 		for range 3 {
 			core.Get("input.metric")
 		}
-		collector.collect()
+		collector.collect(nil)
 		got := make(map[string]float64)
 		for len(collector.data) > 0 {
 			p := <-collector.data

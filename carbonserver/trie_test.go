@@ -1715,7 +1715,7 @@ func TestTrieQuotaThroughputWithDelayedReset(t *testing.T) {
 		return true
 	})
 	sort.Strings(namespaces)
-	if got, want := namespaces, []string{"/", "sys.app.server-001", "sys.app.server-002"}; !reflect.DeepEqual(got, want) {
+	if got, want := namespaces, []string{"sys.app.server-001", "sys.app.server-002"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("namespaces = %s; want %s", got, want)
 	}
 
