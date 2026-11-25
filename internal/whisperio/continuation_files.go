@@ -25,6 +25,7 @@ var continuationNames atomic.Uint64
 // Only headers and file identities stay in memory. Historical values live in
 // shared exact blocks; no raw Whisper body or per-metric OS file is retained.
 type continuationFiles struct {
+	update *continuationUpdateState
 	// snapshotReads is enabled only after private OOO folding has finished.
 	// Archive materialization then performs no writes.
 	snapshotReads bool
@@ -99,6 +100,7 @@ type continuationFileData struct {
 	// every format version encodes pages into, is rewritten whenever pages
 	// change (allocation sets dirty). Relayout moves only compressed blocks.
 	pages       map[uint32]bool
+	sharedPages bool
 	sortedPages []uint32
 	dirty       bool
 	refs        int
@@ -326,7 +328,7 @@ func (fs *continuationFiles) load(name string) (*continuationFileData, error) {
 		if err != nil {
 			return nil, err
 		}
-		d, err = decodeContinuationManifest(encoded)
+		d, err = fs.update.decode(encoded)
 		if err != nil {
 			return nil, err
 		}
@@ -628,8 +630,7 @@ func (f *continuationFile) Truncate(size int64) error {
 	}
 	if !f.data.layout.Compressed && size > 0 {
 		// Ordinary sparse CWhisper sidecars allocate their final page at create.
-		f.data.pages[uint32((size-1)/4096)] = true
-		f.data.sortedPages = nil
+		f.data.allocatePage(uint32((size - 1) / 4096))
 	}
 	f.data.dirty = true
 	return nil

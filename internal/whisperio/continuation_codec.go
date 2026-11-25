@@ -23,6 +23,10 @@ import (
 // blocks. It deliberately preserves buffers, main/OOO precedence and physical
 // block ownership, which a flattened archive snapshot cannot reconstruct.
 type ContinuationCodec struct {
+	// keepUpdateAllocations retains the unpooled update path as a test oracle.
+	keepUpdateAllocations bool
+	// updateState belongs to the private codec copy made by Update.
+	updateState *continuationUpdateState
 	// keepReferenceRetirementReads retains repeated alias probes as a test oracle.
 	keepReferenceRetirementReads bool
 	// keepDenseSumReads retains the canonical window reader as a test oracle.
@@ -646,7 +650,15 @@ var invalidContinuationPoints atomic.Uint64
 func InvalidContinuationPoints() uint64 { return invalidContinuationPoints.Load() }
 
 func (c *ContinuationCodec) Update(ctx context.Context, kv store.ContinuationIO, m store.Metadata, input []store.Point, retention int, clock func() time.Time, maintenance *store.ContinuationMaintenance) error {
-	return c.updateWithMutationProof(ctx, kv, m, input, retention, clock, maintenance)
+	update := *c
+	if !c.keepUpdateAllocations {
+		update.updateState = &continuationUpdateState{scratch: continuationScratchPool.Get().(*continuationScratch)}
+		defer func() {
+			update.updateState.scratch.used = 0
+			continuationScratchPool.Put(update.updateState.scratch)
+		}()
+	}
+	return update.updateWithMutationProof(ctx, kv, m, input, retention, clock, maintenance)
 }
 
 // updateAttempt leaves compressed writes on their existing path. Classic writes
@@ -664,11 +676,15 @@ func (c *ContinuationCodec) updateAttempt(ctx context.Context, kv store.Continua
 	coalesce := coalescePointWrites && len(m.Retentions) > 1 && len(input) > 1
 	if coalesce || !c.keepTailReads {
 		buffer = &continuationPointBuffer{ContinuationIO: kv, cacheReads: !c.keepTailReads, writeThrough: !coalesce}
+		if c.updateState != nil {
+			buffer.scratch = c.updateState.scratch
+		}
 		kv = buffer
 	}
 	timer := stagetime.FromContext(ctx)
 	timer.Enter(stagetime.Load)
 	fs := newContinuationFiles(kv, false).withClock(clock)
+	fs.update = c.updateState
 	fs.reuseBlockKeys = c.ReuseBlockKeys
 	fs.guardClassicWrites = true
 	fs.protectFutureSlots = retention >= 0

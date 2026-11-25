@@ -16,6 +16,15 @@ import (
 // changes 124 points of one of 256 classic metrics, with cached writer state.
 // Run with -benchtime=4096x to compare an identical write trace across revisions.
 func BenchmarkRouteMutationUpdate(b *testing.B) {
+	benchmarkRouteMutationUpdate(b, false)
+}
+
+// The same trace through the previous allocation path, for paired comparisons.
+func BenchmarkRouteMutationUpdateReference(b *testing.B) {
+	benchmarkRouteMutationUpdate(b, true)
+}
+
+func benchmarkRouteMutationUpdate(b *testing.B, keepAllocations bool) {
 	for _, tracked := range []bool{false, true} {
 		b.Run(fmt.Sprintf("tracked=%v", tracked), func(b *testing.B) {
 			ctx := context.Background()
@@ -26,7 +35,7 @@ func BenchmarkRouteMutationUpdate(b *testing.B) {
 				points[i] = store.Point{Timestamp: now - 8192 + int64(i), Value: math.Float64frombits(0x3ff0000000000000 | (uint64(i) * 11400714819323198485 & 0xfffffffffffff))}
 			}
 			kv, m := mutationClassicFixture(b, false, []store.Retention{{Step: 1, Count: 16384}, {Step: 8, Count: 4096}}, [][]store.Point{points, nil}, clock)
-			db, err := store.Open(b.TempDir(), store.Options{ExactBlocks: true, Continuation: &ContinuationCodec{}, Now: clock, SyncInterval: time.Hour, CacheSize: 8 << 20, CacheShards: 1, MemTableSize: 1 << 20, MetadataCacheSize: 64 << 20})
+			db, err := store.Open(b.TempDir(), store.Options{ExactBlocks: true, Continuation: &ContinuationCodec{keepUpdateAllocations: keepAllocations}, Now: clock, SyncInterval: time.Hour, CacheSize: 8 << 20, CacheShards: 1, MemTableSize: 1 << 20, MetadataCacheSize: 64 << 20})
 			if err != nil {
 				b.Fatal(err)
 			}
