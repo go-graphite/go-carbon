@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -64,20 +65,28 @@ func TestOwnerHydrationSIGKILL(t *testing.T) {
 	}
 	dump := func(e *Engine) []byte {
 		t.Helper()
-		var out bytes.Buffer
+		var out [][]byte
 		snap := e.DBs()[0].NewSnapshot()
 		defer snap.Close()
 		err := scanRollups(snap, e.identities, func(p RollupPolicy, m RollupMetadata, r []sealrollup.Record) error {
-			return json.NewEncoder(&out).Encode(struct {
+			var metric bytes.Buffer
+			if err := json.NewEncoder(&metric).Encode(struct {
 				P RollupPolicy
 				M RollupMetadata
 				R []sealrollup.Record
-			}{p, m, r})
+			}{p, m, r}); err != nil {
+				return err
+			}
+			out = append(out, metric.Bytes())
+			return nil
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
-		return out.Bytes()
+		// scanRollups visits a map. Order complete metrics for comparison,
+		// preserving every record and its order within each metric.
+		slices.SortFunc(out, bytes.Compare)
+		return bytes.Join(out, nil)
 	}
 	want := dump(e)
 	if err = e.Close(); err != nil {
@@ -148,7 +157,7 @@ func TestOwnerHydrationSIGKILL(t *testing.T) {
 			t.Fatalf("restart %d installed %d identities", restart, len(o.rollups.ids))
 		}
 		if got := dump(e); !bytes.Equal(got, want) {
-			t.Fatalf("restart %d changed durable samples/metadata", restart)
+			t.Fatalf("restart %d changed durable samples/metadata\nwant: %q\n got: %q", restart, want, got)
 		}
 		if err = e.Close(); err != nil {
 			t.Fatal(err)
