@@ -105,7 +105,7 @@ func (f *continuationFile) referencedClassicGroup(archive, index int, mutable bo
 	}
 	group, err := f.readReferencedClassicGroup(archive, index, key)
 	if err == nil && buffer != nil {
-		buffer.remember(key, group)
+		group = buffer.loaded(key, group, mutable)
 	}
 	return group, err
 }
@@ -120,7 +120,7 @@ func (f *continuationFile) readReferencedClassicGroup(archive, index int, key []
 		read = f.fs.probe
 	}
 	data, err := read(key)
-	group := new(store.PointBlock)
+	group := f.fs.pointBlockScratch()
 	if err == nil {
 		return group, store.DecodePointBlock(data, group)
 	}

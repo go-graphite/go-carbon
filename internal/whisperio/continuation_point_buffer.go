@@ -21,6 +21,7 @@ type continuationPointBuffer struct {
 	// Classic updates are private attempts, discarded in full on any error.
 	// Their dirty groups can be edited again without a per-point copy.
 	editDirty bool
+	scratch   *continuationScratch
 }
 
 var coalescePointWrites = true
@@ -126,14 +127,36 @@ func (b *continuationPointBuffer) point(key []byte, mutable bool) *store.PointBl
 	if !mutable {
 		return block
 	}
-	owned := *block
-	return &owned
+	owned := b.scratch.block()
+	*owned = *block
+	return owned
 }
 
 func (b *continuationPointBuffer) remember(key []byte, block *store.PointBlock) {
 	if !b.cacheReads {
 		return
 	}
+	owned := b.scratch.block()
+	*owned = *block
+	b.rememberOwned(key, owned)
+}
+
+// loaded takes ownership of a fresh decode. Read-only callers use that clean
+// block directly; the first mutable access copies it. Keep the old allocation
+// path for the oracle and callers without a scratch lease.
+func (b *continuationPointBuffer) loaded(key []byte, block *store.PointBlock, mutable bool) *store.PointBlock {
+	if b.scratch == nil {
+		b.remember(key, block)
+		return block
+	}
+	if !b.cacheReads {
+		return block
+	}
+	b.rememberOwned(key, block)
+	return b.point(key, mutable)
+}
+
+func (b *continuationPointBuffer) rememberOwned(key []byte, block *store.PointBlock) {
 	// At most 64 decoded groups (~132KiB) per active update, independent of
 	// metric cardinality or the length of a rewrite. Clearing only reads
 	// cannot flush or discard pending writes.
@@ -143,8 +166,7 @@ func (b *continuationPointBuffer) remember(key []byte, block *store.PointBlock) 
 	if b.reads == nil {
 		b.reads = make(map[string]*store.PointBlock)
 	}
-	owned := *block
-	b.reads[string(key)] = &owned
+	b.reads[string(key)] = block
 }
 
 func (b *continuationPointBuffer) flush(prefix []byte) error {

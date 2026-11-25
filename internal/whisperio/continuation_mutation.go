@@ -28,7 +28,10 @@ func (c *ContinuationCodec) updateWithMutationProof(ctx context.Context, kv stor
 	if baseline == nil {
 		return c.updateWithSumCache(ctx, kv, m, input, retention, clock, maintenance)
 	}
-	before, err := readSumWriteView(baseline, clock)
+	if c.updateState != nil {
+		c.updateState.reuseManifests = true
+	}
+	before, err := readSumWriteView(baseline, clock, c.updateState)
 	if err != nil {
 		return err
 	}
@@ -48,7 +51,7 @@ func (c *ContinuationCodec) updateWithMutationProof(ctx context.Context, kv stor
 			return err
 		}
 	}
-	after, err := readSumWriteView(kv, clock)
+	after, err := readSumWriteView(kv, clock, c.updateState)
 	if err != nil {
 		return err
 	}
@@ -140,10 +143,11 @@ func (c *ContinuationCodec) updateWithMutationProof(ctx context.Context, kv stor
 		}
 	}
 	if changes != nil {
-		return refineClassicMutation(baseline, kv, changes, before, after, windows, recorder, clock)
+		return refineClassicMutation(baseline, kv, changes, before, after, windows, recorder, clock, c.updateState)
 	}
 	open := func(source store.ContinuationIO) (*whisper.Whisper, error) {
 		fs := newContinuationFiles(source, true).withClock(clock)
+		fs.update = c.updateState
 		fs.rangeReads = true
 		return whisper.OpenWithOptions(fs.main(), continuationOptions(fs, clock))
 	}
@@ -186,7 +190,7 @@ func (c *ContinuationCodec) updateWithMutationProof(ctx context.Context, kv stor
 // Both owners of a replaced/deleted slot matter. A stable classic header and
 // circular anchor ensure untouched groups retain the same logical meaning.
 // Unknown key kinds and structural rewrites keep the whole-revision fence.
-func refineClassicMutation(baseline, current store.ContinuationIO, changes *continuationOverlay, before, after sumWriteView, windows [][]whisper.ArchiveWindow, recorder store.ContinuationMutationRecorder, clock func() time.Time) error {
+func refineClassicMutation(baseline, current store.ContinuationIO, changes *continuationOverlay, before, after sumWriteView, windows [][]whisper.ArchiveWindow, recorder store.ContinuationMutationRecorder, clock func() time.Time, manifests *continuationUpdateState) error {
 	if before.file != after.file || after.compressed || before.sidecar || after.sidecar {
 		return nil
 	}
@@ -195,8 +199,14 @@ func refineClassicMutation(baseline, current store.ContinuationIO, changes *cont
 			return nil
 		}
 	}
-	oldFS := newContinuationFiles(baseline, true).withClock(clock)
-	newFS := newContinuationFiles(current, true).withClock(clock)
+	oldFS, newFS := before.fs, after.fs
+	if oldFS == nil {
+		oldFS = newContinuationFiles(baseline, true).withClock(clock)
+	}
+	if newFS == nil {
+		newFS = newContinuationFiles(current, true).withClock(clock)
+	}
+	oldFS.update, newFS.update = manifests, manifests
 	oldData, err := oldFS.load("main.wsp")
 	if err != nil {
 		return err

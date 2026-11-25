@@ -44,7 +44,7 @@ func (f *continuationFile) pointBlockAccess(key []byte, mutable bool) (*store.Po
 			return block, nil
 		}
 	}
-	var block store.PointBlock
+	block := f.fs.pointBlockScratch()
 	read := f.fs.kv.Get
 	// Immutable history reads benefit from reusing open tables even for the
 	// main file. Writers keep fresh main-file lookups, which stop at the
@@ -57,20 +57,20 @@ func (f *continuationFile) pointBlockAccess(key []byte, mutable bool) (*store.Po
 	f.fs.timer.Unnest(stagetime.TailRead, start)
 	if errors.Is(err, store.ErrNotFound) {
 		if buffer, ok := f.fs.kv.(*continuationPointBuffer); ok {
-			buffer.remember(key, &block)
+			block = buffer.loaded(key, block, mutable)
 		}
-		return &block, nil
+		return block, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	if err := store.DecodePointBlock(value, &block); err != nil {
+	if err := store.DecodePointBlock(value, block); err != nil {
 		return nil, err
 	}
 	if buffer, ok := f.fs.kv.(*continuationPointBuffer); ok {
-		buffer.remember(key, &block)
+		block = buffer.loaded(key, block, mutable)
 	}
-	return &block, nil
+	return block, nil
 }
 
 // skipUnallocatedGroups lets classicGroup answer from the page allocation
@@ -112,7 +112,7 @@ func (f *continuationFile) classicGroup(archive int, a whisper.StorageArchiveLay
 	if skipUnallocatedGroups && !f.classicGroupAllocated(a, groupIndex) {
 		unallocatedGroupSkips.Add(1)
 		if mutable {
-			return &store.PointBlock{}, nil
+			return f.fs.pointBlockScratch(), nil
 		}
 		return &emptyPointBlock, nil
 	}
@@ -802,10 +802,7 @@ func (f *continuationFile) allocateClassicPages(start, end int) {
 		return
 	}
 	for page := uint32(start / 4096); page <= uint32((end-1)/4096); page++ {
-		if !f.data.pages[page] {
-			f.data.sortedPages = nil
-		}
-		f.data.pages[page] = true
+		f.data.allocatePage(page)
 	}
 	if !f.data.dirty && end > start {
 		f.data.dirty = true

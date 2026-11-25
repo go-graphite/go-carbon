@@ -177,6 +177,9 @@ func decodeSumBucket(value []byte, first, end int) (store.PointSum, bool) {
 // cache. Mutations outside Update do not advance the cache's revision fence and
 // therefore miss safely on the next digest (cold packing, patch, copy import).
 type sumWriteView struct {
+	// A read-only filesystem over this exact before/after view. The update
+	// may reuse its validated layout during classic proof refinement.
+	fs         *continuationFiles
 	file       uint64
 	compressed bool
 	sidecar    bool
@@ -184,14 +187,20 @@ type sumWriteView struct {
 	buffers    []whisper.ArchiveWindow
 }
 
-func readSumWriteView(kv store.ContinuationIO, clock func() time.Time) (sumWriteView, error) {
+func readSumWriteView(kv store.ContinuationIO, clock func() time.Time, manifests ...*continuationUpdateState) (sumWriteView, error) {
 	fs := newContinuationFiles(kv, true).withClock(clock)
+	if len(manifests) > 0 {
+		fs.update = manifests[0]
+	}
 	w, err := whisper.OpenWithOptions(fs.main(), continuationOptions(fs, clock))
 	if err != nil {
 		return sumWriteView{}, err
 	}
 	defer w.Close()
 	result := sumWriteView{file: w.StorageFile().(*continuationFile).data.id, compressed: w.IsCompressed(), sidecar: w.OutOfOrderPath() != "", buffers: w.BufferedRollupWindows()}
+	if fs.update != nil {
+		result.fs = fs
+	}
 	if result.compressed {
 		layout, err := w.ContinuationLayout()
 		if err != nil {
@@ -222,7 +231,10 @@ func (c *ContinuationCodec) updateWithSumCache(ctx context.Context, kv store.Con
 		}
 		return kv.DeletePrefix(sumRevisionKey)
 	}
-	before, err := readSumWriteView(kv, clock)
+	if c.updateState != nil {
+		c.updateState.reuseManifests = true
+	}
+	before, err := readSumWriteView(kv, clock, c.updateState)
 	if err != nil {
 		return err
 	}
@@ -243,7 +255,7 @@ func (c *ContinuationCodec) updateWithSumCache(ctx context.Context, kv store.Con
 	if err := c.updateReanchoring(ctx, kv, m, input, retention, clock, maintenance); err != nil {
 		return err
 	}
-	after, err := readSumWriteView(kv, clock)
+	after, err := readSumWriteView(kv, clock, c.updateState)
 	if err != nil {
 		return err
 	}

@@ -273,7 +273,7 @@ func TestClassicMutationGroupDeletionAndFallbacks(t *testing.T) {
 				t.Fatal(err)
 			}
 			recorder := &memoryMutationIO{mapContinuationIO: current, baseline: kv}
-			if err := refineClassicMutation(kv, current, changes, before, afterView, windows, recorder, clock); err != nil {
+			if err := refineClassicMutation(kv, current, changes, before, afterView, windows, recorder, clock, nil); err != nil {
 				t.Fatal(err)
 			}
 			if kind == "delete" {
