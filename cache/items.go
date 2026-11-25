@@ -2,6 +2,7 @@ package cache
 
 import (
 	"time"
+	"weak"
 
 	"github.com/go-graphite/go-carbon/internal/inputlog"
 	"github.com/go-graphite/go-carbon/points"
@@ -13,10 +14,11 @@ import (
 // needs a stable identity before pop. Quota state stays inline on the ingest
 // path; ordinary queued items have no raw slice header or separate identity.
 type item struct {
-	hash               uint64 // exact map hash, including forced collisions in tests
-	logFirst           uint64 // first unpersisted generation while queued; see logTracked
-	streamGeneration   uint64 // assigned lazily under the owning shard lock
-	inputlog.StreamRef        // owns the canonical name and atomic input-log hint
+	hash               uint64                     // exact map hash, including forced collisions in tests
+	logFirst           uint64                     // first unpersisted generation while queued; see logTracked
+	streamSeries       weak.Pointer[StreamSeries] // cleared before removal/replacement
+	streamGeneration   uint64                     // assigned lazily under the owning shard lock
+	inputlog.StreamRef                            // owns the canonical name and atomic input-log hint
 	compact            compactPoints
 	// spread is the metric's share of the writeout spread (see
 	// SetWriteoutSpread), fixed at creation so batching checks need no hash.
@@ -184,6 +186,8 @@ func (m *itemMap) setHashed(hash uint64, it *item) int {
 		m.control = make([]byte, n)
 		for _, slot := range old {
 			if slot.item != nil {
+				// Preserve numeric-hint invalidation at a table rebuild.
+				slot.item.unbindStreamItem()
 				m.setHashed(slot.item.hash, slot.item)
 			}
 		}
@@ -214,6 +218,9 @@ func (m *itemMap) setHashed(hash uint64, it *item) int {
 			m.bytes += it.memoryBytes() - slot.item.memoryBytes()
 			m.pointBytes += int64(cap(it.compact.buf) - cap(slot.item.compact.buf))
 			it.hash = hash
+			if slot.item != it {
+				slot.item.unbindStreamItem()
+			}
 			slot.item = it
 			m.invalidateDeadline(i)
 			return i
@@ -238,6 +245,7 @@ func (m *itemMap) removeHashed(hash uint64, name string) {
 		} else if m.control[i] == tag && slot.item.hash == hash && slot.item.Metric == name {
 			m.bytes -= slot.item.memoryBytes()
 			m.pointBytes -= int64(cap(slot.item.compact.buf))
+			slot.item.unbindStreamItem()
 			*slot = itemSlot{}
 			m.control[i] = 1
 			m.invalidateDeadline(i)

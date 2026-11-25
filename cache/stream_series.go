@@ -9,14 +9,16 @@ import (
 	"github.com/zeebo/xxh3"
 )
 
-// A series identity outlives queued batches without retaining any removed batch.
-// Wire-id slices hold these shared identities; only cache insertion/replacement
-// refreshes the atomic hint. The per-point path takes only the usual cache lock.
+// Wire-id slices own shared series identities. A direct item hint is valid only
+// under the shard lock and is cleared before removal, replacement or rehash.
+// The item holds a weak reverse edge, so neither removed batches nor abandoned
+// identities live longer because of this shortcut.
 type StreamSeries struct {
 	name  string
 	cache *Cache
 	hash  uint64
 	hint  atomic.Uint64
+	item  *item // protected by the owning cache shard lock
 }
 type seriesSlot struct {
 	hash uint64
@@ -133,52 +135,86 @@ func (c *Cache) addStreamSeries(series *StreamSeries, value float64, ts int64) {
 		c.AddPoint(series.StreamName(), value, ts)
 		return
 	}
-	if !c.tryStreamPoint(series.hash, &series.hint, value, ts) {
-		c.refreshStreamPoint(series.name, series.hash, &series.hint, value, ts)
+	if !c.tryStreamPoint(series, value, ts) {
+		c.refreshStreamPoint(series, value, ts)
 	}
 }
 
 // Dictionary points enter one warm path. Resolution owns the
-// canonical name; a point only validates the numeric item hint under the shard
-// lock, with no name load, registry lookup or reference-count update. True means
+// canonical name; a point reads its direct item hint under the shard lock.
+// Non-owning identities retain the numeric generation check. True means
 // the point was handled (including quota refusal); false needs cold admission.
-func (c *Cache) tryStreamPoint(hash uint64, hint *atomic.Uint64, value float64, ts int64) bool {
-	sh := c.data[hash&(shardCount-1)]
-	if h := hint.Load(); h != 0 {
+func (c *Cache) tryStreamPoint(series *StreamSeries, value float64, ts int64) bool {
+	h := series.hint.Load()
+	if h == 0 {
+		return false
+	}
+	sh := c.data[series.hash&(shardCount-1)]
+	sh.mu.Lock()
+	it := series.item
+	if it == nil {
 		slot := uint32(h&0xffffff) - 1
-		generation := h >> 24
-		sh.mu.Lock()
-		if int(slot) < len(sh.items.slots) {
-			it := sh.items.slots[slot].item
-			if it != nil && it.streamGeneration == generation {
-				// One current snapshot covers admission and the diversion/dump
-				// boundary. A second pre-lock settings load is unnecessary.
-				s := c.settings.Load().(*cacheSettings)
-				if s.xlog == nil && !s.tagsEnabled {
-					handled := c.addPointLocked(sh, s, it, hash, value, ts)
-					sh.mu.Unlock()
-					return handled
+		if h != 0 && int(slot) < len(sh.items.slots) {
+			candidate := sh.items.slots[slot].item
+			if candidate != nil && candidate.streamGeneration == h>>24 {
+				it = candidate
+				if it.streamSeries == (weak.Pointer[StreamSeries]{}) {
+					bindStreamItem(series, it)
 				}
 			}
 		}
-		sh.mu.Unlock()
 	}
+	if it != nil {
+		s := c.settings.Load().(*cacheSettings)
+		if s.xlog == nil && !s.tagsEnabled {
+			handled := c.addPointLocked(sh, s, it, series.hash, value, ts)
+			sh.mu.Unlock()
+			return handled
+		}
+	}
+	sh.mu.Unlock()
 	return false
 }
 
-// A cold admission borrows either identity type's hint without changing its
-// layout or retaining cache items. The name/hash guard excludes normalized tags.
+// A cache item tracks at most one direct stream identity. Other identities keep
+// the generation-checked numeric hint. Removal clears both links under mu,
+// before the item can be decoded or handed to persistence. Rehash clears the
+// shortcut too, preserving the numeric hint's original refresh boundaries.
+func bindStreamItem(series *StreamSeries, it *item) {
+	if series.hint.Load() == 0 {
+		return
+	}
+	// Make reuses the weak handle already registered by ResolveStreamName.
+	// The reverse edge must remain weak: queued items must not extend a
+	// dictionary identity's lifetime after its final connection releases it.
+	ref := weak.Make(series)
+	if it.streamSeries == ref || it.streamSeries.Value() == nil {
+		it.streamSeries = ref
+		series.item = it
+	}
+}
+
+func (it *item) unbindStreamItem() {
+	if s := it.streamSeries.Value(); s != nil {
+		s.item = nil
+	}
+	it.streamSeries = weak.Pointer[StreamSeries]{}
+}
+
+// Cold admission publishes hints only for the exact canonical name/hash,
+// excluding normalized tags and preserving ordinary recovery/admission behavior.
 type streamPointHint struct {
-	name string
-	hash uint64
-	hint *atomic.Uint64
+	name   string
+	hash   uint64
+	hint   *atomic.Uint64
+	series *StreamSeries
 }
 
 // Keep cold admission outside the warm frame. Ordinary insertion claims recovery
 // and publishes the hint before unlocking, including for an existing rejected item.
-func (c *Cache) refreshStreamPoint(name string, hash uint64, hint *atomic.Uint64, value float64, ts int64) {
-	binding := streamPointHint{name: name, hash: hash, hint: hint}
-	c.addWaiting(points.OnePoint(name, value, ts), false, false, &binding)
+func (c *Cache) refreshStreamPoint(series *StreamSeries, value float64, ts int64) {
+	binding := streamPointHint{name: series.name, hash: series.hash, hint: &series.hint, series: series}
+	c.addWaiting(points.OnePoint(series.name, value, ts), false, false, &binding)
 }
 
 // StreamSeriesIndexBytes reports the fixed-width weak index capacity. Series
