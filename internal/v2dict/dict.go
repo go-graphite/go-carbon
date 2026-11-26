@@ -105,6 +105,8 @@ type Dict struct {
 	merging atomic.Bool
 	mergeMu sync.Mutex // one merge at a time
 	mergeWG sync.WaitGroup
+
+	pol policyTable // Entry.Policy -> immutable suffix (policy.go)
 }
 
 // shard is one shard of the append level: the scopes whose vshard maps to
@@ -237,8 +239,12 @@ func Open(dir string, opt Options) (*Dict, error) {
 			if d.log != nil {
 				_ = d.log.Close()
 			}
+			_ = d.pol.close()
 		}
 	}()
+	if err := d.pol.open(dir); err != nil {
+		return nil, err
+	}
 	for i := range d.shards {
 		d.shards[i].scopeIx = map[string]int{}
 	}
@@ -705,8 +711,17 @@ func (d *Dict) Sync() error {
 		return err
 	}
 	log, frozenLog, gen := d.log, d.frozenLog, d.logSeq<<32|uint64(d.logRecs)
+	if gen <= d.synced {
+		// An earlier Sync, flush or open already covers every record: the
+		// producers' drains sync once per new-name batch, not per call.
+		d.mu.Unlock()
+		return nil
+	}
 	d.mu.Unlock()
-	err := log.Sync()
+	err := hook("log-sync")
+	if err == nil {
+		err = log.Sync()
+	}
 	if err == nil && frozenLog != nil {
 		// Closed: its level file is installed, which is durable.
 		if err = frozenLog.Sync(); errors.Is(err, os.ErrClosed) {
@@ -910,6 +925,7 @@ func (d *Dict) Close() error {
 	d.closed = true
 	d.log.Close()
 	d.mu.Unlock()
+	err = errors.Join(err, d.pol.close())
 	d.flushWG.Wait()
 	d.mergeWG.Wait()
 	return err

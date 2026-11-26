@@ -79,6 +79,7 @@ type Producer struct {
 	packets                         []packet
 	outboxes                        []*v2core.Outbox            // free; one in steady intake
 	applications                    []*v2core.ApplicationPolicy // by catalog ID
+	admit                           []*v2core.ApplicationPolicy // queued names without a dictionary ID
 	cursor                          uint64
 	applyOrder                      uint64
 	journalDir                      string
@@ -330,7 +331,7 @@ func (p *Producer) Seal() error {
 	return nil
 }
 
-// Drain syncs the catalog, then sends the exact queued order to core. On
+// Drain syncs the catalog and the dictionary IDs of new names, then sends the exact queued order to core. On
 // layer 3 core writes it to L0 run files at its next publication.
 func (p *Producer) Drain() error {
 	if p.failed != nil {
@@ -345,6 +346,16 @@ func (p *Producer) Drain() error {
 	start := time.Now()
 	if p.catalog != nil {
 		if err := p.catalog.Sync(); err != nil {
+			return p.fail(err)
+		}
+	}
+	// New names get their dictionary IDs here, durable before core sees
+	// their points: one batch of appends and at most one fsync per drain.
+	if len(p.admit) > 0 {
+		err := p.engine.AdmitNames(p.admit)
+		clear(p.admit)
+		p.admit = p.admit[:0]
+		if err != nil {
 			return p.fail(err)
 		}
 	}

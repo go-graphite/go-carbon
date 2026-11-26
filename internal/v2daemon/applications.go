@@ -108,6 +108,9 @@ func (p *Producer) AppendApplications(apps []Application) error {
 				return p.fail(err)
 			}
 		}
+		if registered.NeedsDictID() {
+			p.admit = append(p.admit, registered) // Drain assigns the ID
+		}
 		if direct {
 			if err := out.Start(registered, a.Order, a.Clock, a.Points[0].Timestamp, len(a.Points)); err != nil {
 				return p.fail(err)

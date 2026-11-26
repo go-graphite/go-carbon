@@ -52,6 +52,9 @@ type policyDefinition struct {
 	suffix   []byte
 	prepared *sealrollup.Prepared
 	Group    partsformat.Group
+	// dictPolicy is the store dictionary's index of suffix once interned
+	// (dict_admission.go), 0 before.
+	dictPolicy atomic.Uint32
 }
 
 type policyIDPage [1024]atomic.Pointer[PolicyIdentity]

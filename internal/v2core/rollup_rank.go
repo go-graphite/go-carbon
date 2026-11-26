@@ -39,35 +39,11 @@ func (r *coreRollups) stageKey(s *rollupStage, m *PolicyIdentity, dict *v2dict.D
 // dictionary shard, so a first seal of many new names allocates nothing per
 // name; the seal syncs the dictionary before it writes a part.
 func (r *coreRollups) dictKeys(dict *v2dict.Dict) error {
-	var scratch [dictChunk]v2dict.NewName
-	var metrics [dictChunk]*PolicyIdentity
-	n := 0
-	appendNames := func() error {
-		err := dict.AppendBatch(scratch[:n])
-		for i := range n {
-			r.dictDirty = r.dictDirty || scratch[i].Created // every unresolved name on error
-			if err == nil {
-				metrics[i].rememberDictID(scratch[i].Entry.ID)
-			}
-		}
-		n = 0
+	// Admission (AdmitNames) resolved every name a producer drained; this
+	// appends only names that reached the seal by another route (L0 replay,
+	// moves, baselines) and orders the stages by ID.
+	if err := r.identities.dictAppend(dict, r.stageMetrics); err != nil {
 		return err
-	}
-	for _, m := range r.stageMetrics {
-		if m.dictID.Load() != 0 {
-			continue
-		}
-		scratch[n], metrics[n] = v2dict.NewName{Group: string(m.policy.Group), VShard: m.vshard, Name: string(m.metricName())}, m
-		if n++; n == dictChunk {
-			if err := appendNames(); err != nil {
-				return err
-			}
-		}
-	}
-	if n > 0 {
-		if err := appendNames(); err != nil {
-			return err
-		}
 	}
 	for i := range r.stages {
 		s, m := &r.stages[i], r.stageMetrics[i]

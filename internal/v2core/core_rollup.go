@@ -137,9 +137,7 @@ type coreRollups struct {
 	unranked []*PolicyIdentity
 	ids      []uint64
 	meta     []metricMetadata
-	// dictDirty reports a dictionary append no successful seal Sync covers
-	// yet; generation is this plan's dictionary generation (0: name keys).
-	dictDirty  bool
+	// generation is this plan's dictionary generation (0: name keys).
 	generation uint64
 }
 
@@ -765,11 +763,10 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		if err := r.dictKeys(dict); err != nil {
 			return coreSealPlan{}, err
 		}
-		if r.dictDirty {
-			if err := dict.Sync(); err != nil {
-				return coreSealPlan{}, err
-			}
-			r.dictDirty = false
+		// Admission synced the names producers drained; this syncs the
+		// names dictKeys appended and costs nothing when nothing is new.
+		if err := dict.Sync(); err != nil {
+			return coreSealPlan{}, err
 		}
 		if r.generation = dict.Generation(); r.generation == 0 {
 			return coreSealPlan{}, errors.New("ID-keyed seal without a durable dictionary generation")
