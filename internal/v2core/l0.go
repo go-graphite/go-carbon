@@ -77,7 +77,7 @@ func encodeL0(dst []byte, v PendingView) []byte {
 			}
 			continue
 		}
-		dst = s.appendL0(dst, v.lookup)
+		dst = s.appendL0(dst, v.durable)
 	}
 	return binary.LittleEndian.AppendUint32(dst, crc32.Checksum(dst, l0Table))
 }
@@ -101,14 +101,14 @@ func appendL0Batch(dst []byte, b *coreBatch) []byte {
 // appendL0 encodes a row segment's applications as appendL0Batch would their
 // decoded batches. Rows ascend, so one cursor walks the escapes. Head row
 // IDs (slots) are written as their durable IDs.
-func (s *pendingSegment) appendL0(dst []byte, lookup func(uint64) *ApplicationPolicy) []byte {
+func (s *pendingSegment) appendL0(dst []byte, durableOf func(uint64) uint64) []byte {
 	first := s.firstRow()
 	escape := sort.Search(len(s.escapes), func(i int) bool { return s.escapes[i].Row >= first })
 	var lastRaw, lastID uint64
 	have := false
 	durable := func(raw uint64) uint64 {
 		if !have || raw != lastRaw {
-			lastRaw, lastID, have = raw, durableID(raw, lookup), true
+			lastRaw, lastID, have = raw, durableOf(raw), true
 		}
 		return lastID
 	}

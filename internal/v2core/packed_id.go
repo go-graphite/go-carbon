@@ -36,7 +36,21 @@ func UnpackID(id uint64) (group, vshard uint16, dict uint32) {
 // policyVPage holds 256 identities of one (group, vshard) dictionary range.
 // Dictionary IDs are dense per vshard, so a store of N names fills
 // N/256 pages plus at most one partial page per populated vshard.
-type policyVPage [256]atomic.Pointer[PolicyIdentity]
+//
+// Pages are numbered in creation order (rowPages). An identity's head row
+// slot is its page's slot | its dictionary ID&255, so a slot maps back to
+// its durable ID as base | slot&255 without reading the identity.
+type policyVPage struct {
+	base uint64 // packed ID of the page's first entry
+	slot uint32 // page number << 8
+	ids  [256]atomic.Pointer[PolicyIdentity]
+}
+
+// maxRowPages bounds page numbers so every slot stays below 2^32.
+const maxRowPages = 1 << 24
+
+// rowPageChunk is one fixed chunk of the page-number directory.
+type rowPageChunk [1 << 12]atomic.Pointer[policyVPage]
 
 // policyVDir is the dense page directory of one (group, vshard).
 type policyVDir []atomic.Pointer[policyVPage]
@@ -105,6 +119,26 @@ func (c *PolicyCatalog) placeGroup(i uint16, group partsformat.Group) error {
 // packedSlot returns the identity slot of packed ID id, creating its page
 // if create is set. Lookups take three atomic loads and no lock.
 func (c *PolicyCatalog) packedSlot(id uint64, create bool) *atomic.Pointer[PolicyIdentity] {
+	if p := c.packedPage(id, create); p != nil {
+		return &p.ids[id&255]
+	}
+	return nil
+}
+
+// rowPage returns the packed page numbered n, or nil.
+func (c *PolicyCatalog) rowPage(n uint64) *policyVPage {
+	if n >= maxRowPages {
+		return nil
+	}
+	if chunk := c.rowPages[n>>12].Load(); chunk != nil {
+		return chunk[n&4095].Load()
+	}
+	return nil
+}
+
+// packedPage returns the page holding packed ID id, creating and numbering
+// it if create is set. It returns nil once page numbers are exhausted.
+func (c *PolicyCatalog) packedPage(id uint64, create bool) *policyVPage {
 	g, v, d := UnpackID(id)
 	groups := c.packed.groups.Load()
 	if groups == nil || int(g) >= len(*groups) || int(v) >= partsformat.VirtualShards {
@@ -117,7 +151,7 @@ func (c *PolicyCatalog) packedSlot(id uint64, create bool) *atomic.Pointer[Polic
 	page := d >> 8
 	if dir := gp.shards[v].Load(); dir != nil && int(page) < len(*dir) {
 		if p := (*dir)[page].Load(); p != nil {
-			return &p[d&255]
+			return p
 		}
 	}
 	if !create {
@@ -143,10 +177,22 @@ func (c *PolicyCatalog) packedSlot(id uint64, create bool) *atomic.Pointer[Polic
 	}
 	p := dir[page].Load()
 	if p == nil {
-		p = &policyVPage{}
+		// Page numbers start at 1, so a slot is never below 256.
+		n := c.rowCount + 1
+		if n >= maxRowPages {
+			return nil
+		}
+		chunk := c.rowPages[n>>12].Load()
+		if chunk == nil {
+			chunk = new(rowPageChunk)
+			c.rowPages[n>>12].Store(chunk)
+		}
+		p = &policyVPage{base: PackID(g, v, page<<8), slot: uint32(n) << 8}
+		chunk[n&4095].Store(p)
+		c.rowCount = n
 		dir[page].Store(p)
 	}
-	return &p[d&255]
+	return p
 }
 
 // packedGroup returns the group label of a packed ID's index.

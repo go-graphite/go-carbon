@@ -16,6 +16,9 @@ type PendingView struct {
 	segs   []pendingSegment
 	n      int
 	lookup func(uint64) *ApplicationPolicy
+	// rows is the owner's catalog, set on owner views: it maps head row IDs
+	// to durable IDs by page arithmetic (durable). Nil views use lookup.
+	rows *PolicyCatalog
 	// fresh lists, once per head, each row application's ID whose name had no
 	// sealed metadata when the owner published it, with the name's hash.
 	fresh []pendingFresh
@@ -149,7 +152,15 @@ func (v PendingView) Ref(pos int) (id uint64, registered *ApplicationPolicy, pol
 	pk := &s.packets[s.packetAt(row)]
 	id, _ = s.idTime(pk, row)
 	h := v.lookup(id)
-	return durableID(id, v.lookup), h, nil
+	return v.durable(id), h, nil
+}
+
+// durable maps a head row ID to the durable ID readers and L0 carry.
+func (v *PendingView) durable(id uint64) uint64 {
+	if v.rows != nil {
+		return v.rows.durableRow(id)
+	}
+	return durableID(id, v.lookup)
 }
 
 // Application decodes the application holding pos and returns the position
@@ -216,7 +227,7 @@ func (v PendingView) Each(fn func(*PendingApplication) bool) {
 					hi++
 				}
 				id, _ := s.idTime(pk, lo)
-				a = PendingApplication{ID: durableID(id, v.lookup), Order: pk.FirstOrder + uint64(d), Clock: pk.Clock, Points: int(hi - lo), lookup: v.lookup}
+				a = PendingApplication{ID: v.durable(id), Order: pk.FirstOrder + uint64(d), Clock: pk.Clock, Points: int(hi - lo), lookup: v.lookup}
 				if !fn(&a) {
 					return
 				}
@@ -253,7 +264,7 @@ func (v PendingView) Suffix(pos int) PendingView {
 		return v
 	}
 	if pos >= v.n {
-		return PendingView{lookup: v.lookup}
+		return PendingView{lookup: v.lookup, rows: v.rows}
 	}
 	i := sort.Search(len(v.segs), func(i int) bool { return v.segs[i].start+v.segs[i].count > pos })
 	segs := make([]pendingSegment, 0, len(v.segs)-i)
@@ -282,7 +293,7 @@ func (v PendingView) Suffix(pos int) PendingView {
 			runs = append(runs, r)
 		}
 	}
-	return PendingView{segs: segs, n: v.n - pos, lookup: v.lookup, fresh: v.fresh, runs: runs}
+	return PendingView{segs: segs, n: v.n - pos, lookup: v.lookup, rows: v.rows, fresh: v.fresh, runs: runs}
 }
 
 // pendingHead is the owner's append-only pending set for one head. Closed
@@ -617,7 +628,7 @@ func (v PendingView) concat(w PendingView) PendingView {
 	}
 	fresh := v.fresh[:len(v.fresh):len(v.fresh)]
 	fresh = append(fresh, w.fresh...)
-	return PendingView{segs: segs, n: v.n + w.n, lookup: v.lookup, fresh: fresh, runs: runs}
+	return PendingView{segs: segs, n: v.n + w.n, lookup: v.lookup, rows: v.rows, fresh: fresh, runs: runs}
 }
 
 // NewNames visits the name hash and ID of each row application whose name had

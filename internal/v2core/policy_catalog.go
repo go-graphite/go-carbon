@@ -88,11 +88,12 @@ type PolicyCatalog struct {
 	// packed holds identities under packed dictionary IDs (packed_id.go),
 	// dense per (group, vshard).
 	packed packedPages
-	// slots numbers packed identities; rows maps a slot to its identity
-	// (rowID). It is apart from the NumericID pages, so a durable NumericID
-	// lookup never resolves a slot.
-	slots atomic.Uint32
-	rows  atomic.Pointer[policyIDPages]
+	// rowPages numbers packed pages in creation order (from 1): a packed
+	// identity's row slot is page number<<8 | dictionary ID&255 (rowID). It
+	// is apart from the NumericID pages, so a durable NumericID lookup never
+	// resolves a slot. rowCount is the last number; pagesMu guards it.
+	rowPages [maxRowPages >> 12]atomic.Pointer[rowPageChunk]
+	rowCount uint64
 }
 type policyCatalogShard struct {
 	mu        sync.Mutex
@@ -244,20 +245,18 @@ func (c *PolicyCatalog) publish(h *PolicyIdentity) (*PolicyIdentity, error) {
 		if !c.packedMatches(h) {
 			return nil, errors.New("v2core: packed ID names another group or vshard")
 		}
-		// The row slot resolves before the identity is visible, so every
-		// head row a reader of h writes maps back. A publication that loses
-		// the race leaves an empty slot.
-		h.slot = c.slots.Add(1)
-		if uint64(h.slot) >= denseIDPages<<10 {
+		// The row slot is fixed by the page before the identity is visible,
+		// so every head row a reader of h writes maps back; a publication
+		// that loses the race computed the winner's slot.
+		page := c.packedPage(h.id, true)
+		if page == nil {
 			return nil, errors.New("v2core: packed identity slots exhausted")
 		}
-		rowSlot := &c.densePage(&c.rows, uint64(h.slot)>>10, true)[h.slot&1023]
-		rowSlot.Store(h)
-		slot = c.packedSlot(h.id, true)
+		h.slot = page.slot | uint32(h.id&255)
+		slot = &page.ids[h.id&255]
 		if slot.CompareAndSwap(nil, h) {
 			return h, nil
 		}
-		rowSlot.Store(nil)
 		return policyIdentityMatches(slot.Load(), string(h.metricName()), h.definitionBytes())
 	} else {
 		slot = &c.idPage(h.id>>10, true)[h.id&1023]
@@ -428,13 +427,24 @@ func durableID(id uint64, lookup func(uint64) *ApplicationPolicy) uint64 {
 	return id // a NumericID is its own row ID
 }
 
+// durableRow is durableID by page arithmetic: a slot's page holds its base,
+// so the translation reads no identity. Head scans (L0, Each) call it per row.
+func (c *PolicyCatalog) durableRow(id uint64) uint64 {
+	if id <= math.MaxUint32 {
+		if p := c.rowPage(id >> 8); p != nil {
+			return p.base | id&255
+		}
+	}
+	return id
+}
+
 // rowLookup resolves a head row ID (a slot) or a durable ID. A store with
 // packed identities holds no NumericID ones (publish), so the two never
 // share a value below 2^32.
 func (c *PolicyCatalog) rowLookup(id uint64) *PolicyIdentity {
-	if id < denseIDPages<<10 {
-		if p := c.densePage(&c.rows, id>>10, false); p != nil {
-			if h := p[id&1023].Load(); h != nil {
+	if id <= math.MaxUint32 {
+		if p := c.rowPage(id >> 8); p != nil {
+			if h := p.ids[id&255].Load(); h != nil {
 				return h
 			}
 		}
