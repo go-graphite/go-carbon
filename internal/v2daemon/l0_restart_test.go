@@ -48,7 +48,9 @@ func TestL0SIGKILL(t *testing.T) {
 				})
 			}
 		}
-		s, err := openWithHooks(root, l0Config(), v2core.Hooks{Stage: cut})
+		cfg := l0Config()
+		cfg.L0Dir = os.Getenv("V2_L0_CHILD_L0DIR")
+		s, err := openWithHooks(root, cfg, v2core.Hooks{Stage: cut})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -64,10 +66,15 @@ func TestL0SIGKILL(t *testing.T) {
 		}
 		t.Fatal("missed crash stage", stage)
 	}
-	for _, stage := range []string{"l0-written", "l0-renamed", "seal", "commit"} {
+	for _, stage := range []string{"l0-written", "l0-renamed", "seal", "commit", "l0-renamed/moved", "commit/moved"} {
 		t.Run(stage, func(t *testing.T) {
 			root := t.TempDir()
 			cfg := l0Config()
+			stage, moved := strings.CutSuffix(stage, "/moved")
+			if moved {
+				// L0 on its own directory, as v2.l0-dir puts it on tmpfs.
+				cfg.L0Dir = filepath.Join(t.TempDir(), "shm", "l0")
+			}
 			s, err := Open(root, cfg)
 			if err != nil {
 				t.Fatal(err)
@@ -79,7 +86,7 @@ func TestL0SIGKILL(t *testing.T) {
 				t.Fatal(err)
 			}
 			cmd := exec.Command(os.Args[0], "-test.run=^TestL0SIGKILL$", "-test.timeout=30s")
-			cmd.Env = append(os.Environ(), "V2_L0_CHILD_ROOT="+root, "V2_L0_CHILD_STAGE="+stage)
+			cmd.Env = append(os.Environ(), "V2_L0_CHILD_ROOT="+root, "V2_L0_CHILD_STAGE="+stage, "V2_L0_CHILD_L0DIR="+cfg.L0Dir)
 			pipe, err := cmd.StdoutPipe()
 			if err != nil {
 				t.Fatal(err)
@@ -124,6 +131,14 @@ func TestL0SIGKILL(t *testing.T) {
 			if stage == "l0-written" {
 				count = 6
 			}
+			if stage == "l0-renamed" {
+				// The killed child's run file is where the config puts it.
+				inRoot, _ := filepath.Glob(filepath.Join(root, "*", "core", "*", "l0", "l0-*"))
+				inDir, _ := filepath.Glob(filepath.Join(cfg.L0Dir, "owner-*", "l0-*"))
+				if moved && (len(inRoot) != 0 || len(inDir) == 0) || !moved && len(inRoot) == 0 {
+					t.Fatalf("L0 files under root %v, under L0Dir %v (moved %v)", inRoot, inDir, moved)
+				}
+			}
 			for restart := range 2 {
 				s, err = Open(root, cfg)
 				if err != nil {
@@ -138,6 +153,9 @@ func TestL0SIGKILL(t *testing.T) {
 				}
 				if files, _ := filepath.Glob(filepath.Join(root, "*", "core", "*", "l0", "l0-*")); len(files) != 0 {
 					t.Fatalf("restart %d left L0 files %v", restart, files)
+				}
+				if _, err := os.Stat(cfg.L0Dir); moved && !os.IsNotExist(err) {
+					t.Fatalf("restart %d: clean close kept L0 dir: %v", restart, err)
 				}
 			}
 			// The store keeps accepting input above the restored order.

@@ -21,6 +21,8 @@ import (
 // each row keeps its application Order and Clock, so loading rows a seal
 // already covers converges to the same records. Files are written, never
 // fsynced: a kill -9 keeps them in the page cache, a power loss may lose them.
+// So Config.L0Dir may put them on tmpfs, which keeps the same guarantee
+// without process or device writes.
 const l0Magic = "V2L0\x01"
 
 var l0Table = crc32.MakeTable(crc32.Castagnoli)
@@ -205,7 +207,12 @@ func decodeL0(b []byte) ([]coreBatch, error) {
 	return out, nil
 }
 
-func (o *coreOwner) l0Dir() string { return filepath.Join(o.dir, "l0") }
+func (o *coreOwner) l0Dir() string {
+	if o.cfg.L0Dir != "" {
+		return filepath.Join(o.cfg.L0Dir, fmt.Sprintf("owner-%03d", o.index))
+	}
+	return filepath.Join(o.dir, "l0")
+}
 
 // openL0 creates the owner's L0 directory, removes temporaries a kill left
 // before their rename and returns the files present, oldest first, and the

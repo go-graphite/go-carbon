@@ -44,6 +44,10 @@ type Config struct {
 	// MaxCoreRows bounds each core owner's staging buffer. Zero retains the
 	// experiment default; small correctness fixtures can bound their memory.
 	MaxCoreRows int
+	// L0Dir holds layer-3 L0 run files outside root, e.g. on tmpfs: they need
+	// to outlive a kill -9, not a reboot (a clean stop seals them). Empty keeps
+	// them under root. Open claims it for root (claimL0Dir).
+	L0Dir string
 }
 
 // Store owns core and its serial producers. Stop all producers before Close.
@@ -53,6 +57,7 @@ type Store struct {
 	Producers []*Producer
 	cfg       Config
 	lock      *os.File
+	l0Dir     string // claimed outside L0 directory, released by a clean Close
 }
 type packet struct {
 	out     *v2core.Outbox // direct L3 applications
@@ -87,7 +92,7 @@ func coreConfig(c Config) v2core.Config {
 	if maxRows == 0 {
 		maxRows = 2 << 20
 	}
-	return v2core.Config{L0: c.Layer == 3, SealInterval: c.SealInterval, SealMaxRows: c.SealMaxRows, KeepBaseRows: c.KeepBaseRows, Rollups: c.Layer == 3, JournalIdentity: "core-first-fixed-v1", Producers: c.Producers, Shards: c.Shards, Owners: c.Shards, MaxRows: maxRows, PartitionSeconds: 86400, AppendParts: true, RawCodec: "run1"}
+	return v2core.Config{L0: c.Layer == 3, L0Dir: c.L0Dir, SealInterval: c.SealInterval, SealMaxRows: c.SealMaxRows, KeepBaseRows: c.KeepBaseRows, Rollups: c.Layer == 3, JournalIdentity: "core-first-fixed-v1", Producers: c.Producers, Shards: c.Shards, Owners: c.Shards, MaxRows: maxRows, PartitionSeconds: 86400, AppendParts: true, RawCodec: "run1"}
 }
 
 // Open recovers durable journal layers through the normal core write queues.
@@ -123,9 +128,15 @@ func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers 
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return nil, err
 	}
-	lock, _, err := lockRoot(root, c)
+	lock, existed, err := lockRoot(root, c)
 	if err != nil {
 		return nil, err
+	}
+	if c.Layer == 3 && c.L0Dir != "" {
+		if err := claimL0Dir(c.L0Dir, root, !existed); err != nil {
+			_ = lock.Close()
+			return nil, fmt.Errorf("v2 L0 dir: %w", err)
+		}
 	}
 	if c.Prepare != nil {
 		if err := c.Prepare(); err != nil {
@@ -147,6 +158,9 @@ func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers 
 		return nil, err
 	}
 	s := &Store{Core: e, cfg: c, lock: lock}
+	if c.Layer == 3 {
+		s.l0Dir = c.L0Dir
+	}
 	// Register admission sinks serially; each recovery worker exclusively owns one producer.
 	for i := 0; i < c.Producers; i++ {
 		p := &Producer{applyOrder: baselineOrder, engine: e, index: i, count: c.Producers, layer: c.Layer, maxPending: c.MaxPendingRows, interval: c.GroupInterval, nextSync: time.Now().Add(c.GroupInterval)}
@@ -376,9 +390,67 @@ func (s *Store) Close() error {
 		result = errors.Join(result, s.Core.Close())
 		s.Core = nil
 	}
+	if result == nil && s.l0Dir != "" {
+		result = releaseL0Dir(s.l0Dir)
+	}
 	if s.lock != nil {
 		result = errors.Join(result, s.lock.Close())
 		s.lock = nil
 	}
 	return result
+}
+
+const l0Marker = "store"
+
+// claimL0Dir binds an L0 directory outside root to this store: a marker names
+// the root that owns it, so two stores never share one. A new store (no
+// restart.json before this open) drops run files a wiped store at the same
+// root left; no frontier or catalog here can resolve them.
+func claimL0Dir(dir, root string, fresh bool) error {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	if err = os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	marker := filepath.Join(dir, l0Marker)
+	f, err := os.OpenFile(marker, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err == nil {
+		_, err = f.WriteString(abs)
+		err = errors.Join(err, f.Close())
+	} else if os.IsExist(err) {
+		var b []byte
+		if b, err = os.ReadFile(marker); err == nil && string(b) != abs {
+			err = fmt.Errorf("%s belongs to store %s, not %s", dir, b, abs)
+		}
+	}
+	if err != nil || !fresh {
+		return err
+	}
+	owners, err := filepath.Glob(filepath.Join(dir, "owner-*"))
+	for _, o := range owners {
+		err = errors.Join(err, os.RemoveAll(o))
+	}
+	return err
+}
+
+// releaseL0Dir removes a cleanly closed store's L0 directory. Close sealed
+// every run file, so it holds only empty owner directories and the marker; any
+// file left keeps the directory and its claim.
+func releaseL0Dir(dir string) error {
+	owners, err := filepath.Glob(filepath.Join(dir, "owner-*"))
+	if err != nil {
+		return err
+	}
+	for _, o := range owners {
+		if os.Remove(o) != nil {
+			return nil
+		}
+	}
+	if err = os.Remove(filepath.Join(dir, l0Marker)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	_ = os.Remove(dir) // kept if something else lives there
+	return nil
 }
