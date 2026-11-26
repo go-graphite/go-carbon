@@ -156,10 +156,12 @@ func (it *Iter) Entry() Entry { return decode(it.val[:]) }
 // vshard move.
 func (d *Dict) Scan(group string, vshard uint16, prefix []byte, fn func(name []byte, e Entry) bool) {
 	it := d.NewIter(group, vshard)
-	var decoder scanDecoder
-	defer decoder.close()
-	for i := range it.lv {
-		it.lv[i].decoder = &decoder
+	if len(it.lv) != 0 {
+		var decoder scanDecoder
+		defer decoder.close()
+		for i := range it.lv {
+			it.lv[i].decoder = &decoder
+		}
 	}
 	for ok := it.SeekGE(prefix); ok && bytes.HasPrefix(it.Name(), prefix); ok = it.Next() {
 		if !fn(it.Name(), it.Entry()) {
