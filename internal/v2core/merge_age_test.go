@@ -18,7 +18,7 @@ func TestMergeAgedAdjacentRange(t *testing.T) {
 	e := mergeFixtureIdle(t, t.TempDir(), nil)
 	defer e.close()
 	o := e.owners[0]
-	for n := uint64(1); n <= 3; n++ {
+	for n := uint64(1); n <= sealedMergeFanIn/2; n++ {
 		mergeAppend(t, e, n)
 	}
 	live := seqLiveParts(t, o)

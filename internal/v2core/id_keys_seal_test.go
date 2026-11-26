@@ -251,8 +251,9 @@ func TestIDKeyedSealDifferential(t *testing.T) {
 						o := engines[1].owners[0]
 						priorGC := o.gc
 						removedBefore := priorGC.removedParts.Load()
-						if n := mergeDrain(t, o); n == 0 {
-							t.Fatal("no ID-keyed parts merged")
+						// Full merge: ratio-sized windows need more seals than short policies produce.
+						if changed, err := o.mergeSealedParts(nil, true); err != nil || !changed {
+							t.Fatal("no ID-keyed parts merged ", err)
 						}
 						compare(epoch)
 						reopen(0)
