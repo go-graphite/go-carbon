@@ -28,6 +28,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -118,11 +119,21 @@ func orderProofFor(key any, label string) *orderProof {
 	if label == "" {
 		label = callerTestName()
 	}
-	p := &orderProof{entries: map[proofKey][]proofEntry{}, names: map[string]*proofName{}, seen: map[v2part.Digest]int{}}
-	p.stats.Label = fmt.Sprintf("%s#%d", label, len(orderProofs))
+	p := newOrderProof(fmt.Sprintf("%s#%d", label, len(orderProofs)))
 	orderProofKey[key] = p
 	orderProofs = append(orderProofs, p)
 	return p
+}
+
+func newOrderProof(label string) *orderProof {
+	p := &orderProof{entries: map[proofKey][]proofEntry{}, names: map[string]*proofName{}, seen: map[v2part.Digest]int{}}
+	p.stats.Label = label
+	return p
+}
+
+// failures is what ORDER_PROOF_STRICT=1 fails the package on.
+func (p *orderProof) failures() int {
+	return p.stats.DisagreeTimeSeq + p.stats.DisagreeVisible
 }
 
 func callerTestName() string {
@@ -179,7 +190,7 @@ func orderProofFlush() (failures int) {
 		p.stats.MinOrderSortInversions = sortInversions(p.partMin)
 		b, _ := json.Marshal(p.stats)
 		f.Write(append(b, '\n'))
-		failures += p.stats.DisagreeTimeSeq + p.stats.DisagreeVisible
+		failures += p.failures()
 	}
 	orderProofs, orderProofKey = nil, map[any]*orderProof{}
 	return failures
@@ -285,8 +296,13 @@ func (p *orderProof) meta(name string, m RollupMetadata) {
 		}
 		// ResetOrder is the expiry seal. A collector that starts after it (a
 		// planner opened mid-history) places the reset before its first part.
+		// A cleared reset (fresh metadata installed over an expired name)
+		// masks no part: Order > 0 and seq > 0 hold for every record.
 		s.resetOrder, s.resetSeq = reset, p.seq
-		if !m.Expired && first {
+		switch {
+		case reset == 0:
+			s.resetSeq = 0
+		case !m.Expired && first:
 			s.resetSeq = p.seq - 1
 		}
 		p.reset[name] = true
@@ -541,13 +557,14 @@ func (p *orderProof) readPart(part livePart) error {
 }
 
 // orderProofEngine opens a merge-free engine whose hook clock is *clock, so
-// idle closure runs at simulated seal times.
+// idle closure runs at simulated seal times. The test goroutine writes *clock
+// atomically; the engine's part-GC goroutine reads it through the hook.
 func orderProofEngine(t *testing.T, root string, clock *int64, shards int) *Engine {
 	t.Helper()
 	cfg := coreTestConfig()
 	cfg.Shards, cfg.Producers, cfg.Rollups = shards, 1, true
 	cfg.MaxRows = 1 << 16
-	e, err := Open(root, cfg, Hooks{Now: func() time.Time { return time.Unix(*clock, 0) }})
+	e, err := Open(root, cfg, Hooks{Now: func() time.Time { return time.Unix(atomic.LoadInt64(clock), 0) }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -626,7 +643,7 @@ func TestOrderProofRealNames(t *testing.T) {
 			order := uint64(0)
 			idle := make([]int, len(metrics))
 			for step := 0; step < 360; step++ {
-				clock += 10
+				atomic.AddInt64(&clock, 10)
 				var batches []Batch
 				for i, m := range metrics {
 					if idle[i] > 0 {
@@ -703,17 +720,65 @@ func TestOrderProofBackgroundCorpus(t *testing.T) {
 	}
 	seal()
 	for round := 0; round < 120; round++ {
-		clock += 3
+		atomic.AddInt64(&clock, 3)
 		appendOne(rng.Intn(metrics))
 		if round%3 == 2 {
 			seal()
 		}
 	}
 	for step := 0; step < 12; step++ {
-		clock = now + 400 + int64(step)*7
+		atomic.StoreInt64(&clock, now+400+int64(step)*7)
 		for _, i := range rng.Perm(metrics)[:1+rng.Intn(4)] {
 			appendOne(i)
 		}
 		seal()
+	}
+}
+
+// TestOrderProofClearedReset replays the planner history behind the
+// TestRollupRankRenumberBoundary and TestRollupSlotAdoptionInterleaved
+// disagreements: a name expires (ResetOrder 350), the script installs fresh
+// metadata over it, and the revival seal writes ResetOrder 0. Reads and the
+// part-sequence rule then both show every record, so the proof must agree;
+// with one rewritten key's part sequence reversed, strict mode must fail.
+func TestOrderProofClearedReset(t *testing.T) {
+	const t0 = 1801958400
+	type rec struct {
+		slot  int64
+		order uint64
+		time  int64
+		bits  uint64
+	}
+	run := func(reverse bool) *orderProof {
+		rewrite := []rec{{9, 2882, t0 + 90, 3}, {9, 2900, t0 + 90, 4}}
+		if reverse {
+			rewrite[0], rewrite[1] = rewrite[1], rewrite[0]
+		}
+		parts := []struct {
+			meta RollupMetadata
+			recs []rec
+		}{
+			{RollupMetadata{Version: 3, Frontier: sealrollup.Frontier{Order: 15}}, []rec{{0, 15, t0, 1}}},
+			{RollupMetadata{Version: 3, Frontier: sealrollup.Frontier{Order: 350}}, []rec{{1, 350, t0 + 10, 2}}},
+			{RollupMetadata{Version: 2, Expired: true, ResetOrder: 350, Frontier: sealrollup.Frontier{Order: 350}}, nil},
+			{RollupMetadata{Version: 3, Frontier: sealrollup.Frontier{Order: 2882}}, rewrite[:1]},
+			{RollupMetadata{Version: 3, Frontier: sealrollup.Frontier{Order: 2900}}, rewrite[1:]},
+		}
+		p := newOrderProof(t.Name())
+		for _, part := range parts {
+			p.begin()
+			p.meta("a.15", part.meta)
+			for _, r := range part.recs {
+				p.record("a.15", sealrollup.Record{Delta: sealrollup.Delta{Slot: r.slot, Order: r.order, Sample: sealrollup.Sample{Time: r.time, Bits: r.bits}}})
+			}
+			p.end()
+		}
+		return p
+	}
+	if p := run(false); p.failures() != 0 || p.stats.DisagreePureSeq != 0 || p.stats.Evaluations == 0 {
+		t.Fatalf("cleared reset: %d strict failures, %d pure-seq, %d evaluations: %v", p.failures(), p.stats.DisagreePureSeq, p.stats.Evaluations, p.stats.Examples)
+	}
+	if p := run(true); p.failures() == 0 || p.stats.DisagreeTimeSeq != 1 {
+		t.Fatalf("reversed part sequence for one key: %d strict failures, %d time+seq; strict mode must catch it", p.failures(), p.stats.DisagreeTimeSeq)
 	}
 }
