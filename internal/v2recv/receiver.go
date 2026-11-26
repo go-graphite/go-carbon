@@ -346,10 +346,14 @@ func (s *Server) work(i int, o Owner) {
 			s.stats.accepted.Add(uint64(len(b.data)))
 		}
 	}
-	syncOwner := func() {
+	syncOwner := func(seal bool) {
 		take()
 		if !failed {
-			if err := errors.Join(o.Seal(), o.Drain()); err != nil {
+			var err error
+			if seal {
+				err = o.Seal()
+			}
+			if err = errors.Join(err, o.Drain()); err != nil {
 				failed = true
 				s.stats.sink.Add(1)
 				s.fail(err)
@@ -368,11 +372,13 @@ func (s *Server) work(i int, o Owner) {
 				call.ack <- call.run()
 			}
 		case <-in.full:
-			take()
+			// A full inbox has already paid its batching wait. Submit it now
+			// instead of adding the producer's next drain tick to visibility.
+			syncOwner(false)
 		case <-tick.C:
-			syncOwner()
+			syncOwner(true)
 		case <-s.closing:
-			syncOwner()
+			syncOwner(true)
 			return
 		}
 	}
