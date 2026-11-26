@@ -66,6 +66,25 @@ func TestPolicyCatalogPackedIdentities(t *testing.T) {
 			t.Fatalf("lookup %#x: %v", ids[i], h)
 		}
 	}
+	// Names of one vshard across 256-slot page boundaries keep their slots.
+	var same []string
+	want := partsformat.Route("same.vshard.0")
+	for i := 0; len(same) < 6; i++ {
+		if name := fmt.Sprintf("same.vshard.%d", i); partsformat.Route(partsformat.ID(name)) == want {
+			same = append(same, name)
+		}
+	}
+	for i, d := range []uint32{0, 255, 256, 511, 512, 70000} {
+		_, raw := rollupTestPolicy(t, same[i], "1s:1d", sealrollup.Last, .5)
+		if _, err := c.intern(PackID(g, want, d), same[i], raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, d := range []uint32{0, 255, 256, 511, 512, 70000} {
+		if h := c.lookup(PackID(g, want, d)); h == nil || h.Name() != same[i] {
+			t.Fatalf("dict ID %d: page slot aliased (%v)", d, h)
+		}
+	}
 	// A NumericID and the packed space never share slots.
 	_, raw := rollupTestPolicy(t, "numeric.name", "1s:1d", sealrollup.Last, .5)
 	if _, err := c.intern(7, "numeric.name", raw); err != nil {
