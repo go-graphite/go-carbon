@@ -603,8 +603,8 @@ const (
 	// cannot take: sidecar files, shared references, an empty slot zero with
 	// points, off-grid slots, or a write that would expose unallocated slots.
 	TransferMergeFallbackClassic = "classic"
-	// TransferMergeFallbackNaN: a copy holds NaN (or off-grid) points that
-	// the union drops; an append would keep them in the source's blocks.
+	// TransferMergeFallbackNaN: a copy holds NaN, off-grid, or repaired Inf points that
+	// the union changes; an append would preserve the unnormalized values.
 	TransferMergeFallbackNaN = "nan"
 	// TransferMergeFallbackOverlap: a target point is at or before the
 	// source's newest block point.
@@ -755,7 +755,7 @@ func (s *Store) prepareTransfer(ctx context.Context, records []TransferMetric, m
 			if m.Continuation && old.Continuation {
 				fallback, classic := TransferMergeFallbackDisabled, false
 				if merger, ok := s.continuation.(ContinuationArchiveMerger); normalized && ok && !s.transferMergeAppendOff {
-					// The union dropped points the appended copy would keep, so
+					// The union dropped or repaired points the appended copy would keep, so
 					// the merger's verify would fail after doing all its work.
 					fallback = TransferMergeFallbackNaN
 				} else if ok && !s.transferMergeAppendOff {
@@ -901,8 +901,8 @@ func retainTransferSlotsAt(points []Point, retention Retention, now int64) []Poi
 }
 
 // retainTransferSlots applies the same finite archive capacity as an ordinary
-// writer. fillArchive has already resolved equal timestamps in the target's
-// favor and sorted them. Different timestamps can still alias a circular slot
+// writer. fillArchive has already resolved equal timestamps (finite targets
+// win) and sorted them. Different timestamps can still alias a circular slot
 // after the target has advanced past the source's last write; keep the newer
 // interval while preserving every non-aliased point, even in sparse archives.
 func retainTransferSlots(points []Point, retention Retention) []Point {

@@ -29,7 +29,7 @@ import (
 //  3. verify: every name present on both sides, every archive. A hole is a
 //     timestamp where a source has a finite point and the target has none.
 //  4. fill: re-pull names with holes from each source that has the points
-//     (the importer keeps existing target points), then re-verify only them.
+//     (the importer keeps finite target points), then re-verify only them.
 //  5. report remaining holes after the repair verification (two rounds by default).
 //
 // Every phase is journaled under --state; --resume restores the saved run.
@@ -72,7 +72,7 @@ type syncCopyResult struct {
 
 // syncBackend is everything sync needs from the stores. Info and Fetch omit
 // names the store does not know; Copy pulls names from source into target
-// with existing target points winning, journaled at journal.
+// with finite target points winning, journaled at journal.
 type syncBackend interface {
 	List(ctx context.Context, store, prefix, after string, limit int) ([]string, error)
 	Info(ctx context.Context, store string, names []string) (map[string][]syncArchive, error)

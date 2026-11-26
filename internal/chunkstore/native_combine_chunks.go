@@ -77,7 +77,13 @@ func (s *Store) nativeCombineChunks(ctx context.Context, source, target Transfer
 				intersected[archive] = true
 			}
 			for slot, p := range b.Points {
-				if b.has(slot) && (!a.has(slot) || PreferArchiveTimestamp(p.Timestamp, a.Points[slot].Timestamp, r, now)) {
+				if !b.has(slot) {
+					continue
+				}
+				if a.has(slot) && p.Timestamp == a.Points[slot].Timestamp && PreferFiniteFill(a.Points[slot].Value, p.Value) {
+					continue
+				}
+				if !a.has(slot) || PreferArchiveTimestamp(p.Timestamp, a.Points[slot].Timestamp, r, now) {
 					a.set(slot, p)
 				}
 			}

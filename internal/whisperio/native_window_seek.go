@@ -299,7 +299,10 @@ func (c *ContinuationCodec) PlanNativeWindowPatch(ctx context.Context, kv store.
 					}
 					class.StaleEvictedPoints++
 				}
-				if !store.PreferArchiveTimestamp(p.Timestamp, old.Timestamp, archive.Retention, clock().Unix()) || old.Timestamp == p.Timestamp && !math.IsNaN(old.Value) {
+				// Only this explicit import may repair an equal-time Inf. Normal
+				// live writes and ring-owner ordering retain their precedence.
+				keepEqual := old.Timestamp == p.Timestamp && !math.IsNaN(old.Value) && !store.PreferFiniteFill(p.Value, old.Value)
+				if !store.PreferArchiveTimestamp(p.Timestamp, old.Timestamp, archive.Retention, clock().Unix()) || keepEqual {
 					continue
 				}
 			}

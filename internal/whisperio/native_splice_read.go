@@ -292,6 +292,11 @@ func (c *ContinuationCodec) nativeFragments(ctx context.Context, kv store.Contin
 			continue
 		}
 		for i, value := range series.Values() {
+			// Finite buffer inputs can still overflow a virtual sum. The
+			// reference union must apply the explicit fill policy to Inf.
+			if math.IsInf(value, 0) {
+				return nil, false, nil
+			}
 			ts := int64(series.FromTime() + i*series.Step())
 			if ts <= 0 || ts > math.MaxUint32 || ts%int64(m.Retentions[window.Archive].Step) != 0 {
 				return nil, false, nil

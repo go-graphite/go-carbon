@@ -118,7 +118,29 @@ func TestNativeWindowPatchGuardLegacyDifferential(t *testing.T) {
 			if err := codec.RestoreArchives(ctx, kv, target, clock); err != nil {
 				t.Fatal(err)
 			}
-			want, wh, we := codec.legacyPlanNativeWindowPatch(ctx, kv, source, clock, w)
+			// Keep the frozen oracle unchanged. Preseed only the new repair
+			// exception; every other encoded byte must still match legacy.
+			oracle := target
+			oracle.Archives = slices.Clone(target.Archives)
+			for ai := range oracle.Archives {
+				donor := map[int64]float64{}
+				for _, p := range source.Archives[ai].Points {
+					if !math.IsNaN(p.Value) && !math.IsInf(p.Value, 0) {
+						donor[p.Timestamp] = p.Value
+					}
+				}
+				oracle.Archives[ai].Points = slices.Clone(target.Archives[ai].Points)
+				for i, p := range oracle.Archives[ai].Points {
+					if v, ok := donor[p.Timestamp]; ok && math.IsInf(p.Value, 0) {
+						oracle.Archives[ai].Points[i].Value = v
+					}
+				}
+			}
+			oracleKV := mapContinuationIO{}
+			if err := codec.RestoreArchives(ctx, oracleKV, oracle, clock); err != nil {
+				t.Fatal(err)
+			}
+			want, wh, we := codec.legacyPlanNativeWindowPatch(ctx, oracleKV, source, clock, w)
 			got, class, gh, ge := codec.PlanNativeWindowPatch(ctx, kv, source, clock, w)
 			sortWrites := func(writes []store.RelayoutKV) {
 				slices.SortFunc(writes, func(a, b store.RelayoutKV) int { return bytes.Compare(a.Key, b.Key) })
