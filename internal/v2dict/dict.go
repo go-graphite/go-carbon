@@ -633,6 +633,32 @@ func (d *Dict) Delete(group string, vshard uint16, name []byte) (bool, error) {
 	return true, err
 }
 
+// SetPolicy records policy on the name's live entry when it has none: an
+// entry written before the policy table existed, whose policy only a retired
+// catalog knew. A recorded policy never changes. It reports whether it
+// changed the entry; the entry is durable after the next Sync.
+func (d *Dict) SetPolicy(group string, vshard uint16, name []byte, policy uint16) (bool, error) {
+	var ab [keyBuf]byte
+	key := append(scopeKey(ab[:0], group, vshard), name...)
+	sh := d.shard(vshard)
+	sh.mu.Lock()
+	if err := d.writableShared(); err != nil {
+		sh.mu.Unlock()
+		return false, err
+	}
+	e, ok := d.getLocked(sh, key)
+	if !ok || e.Deleted() || e.Policy != 0 || policy == 0 {
+		sh.mu.Unlock()
+		return false, nil
+	}
+	e.Policy = policy
+	d.put(sh, key, e)
+	err := d.commit(sh)
+	sh.mu.Unlock()
+	d.maybeFreeze()
+	return true, err
+}
+
 func (d *Dict) writable() error {
 	if d.closed {
 		return errors.New("v2dict: closed")

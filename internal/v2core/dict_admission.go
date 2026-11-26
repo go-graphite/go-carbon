@@ -166,13 +166,21 @@ func (c *PolicyCatalog) admit(name string, definition []byte) (*PolicyIdentity, 
 	if err != nil {
 		return nil, err
 	}
-	ent, ok := d.Lookup(string(group), vshard, unsafe.Slice(unsafe.StringData(name), len(name)))
-	if !ok || ent.Deleted() {
+	key := unsafe.Slice(unsafe.StringData(name), len(name))
+	ent, ok := d.Lookup(string(group), vshard, key)
+	if !ok || ent.Deleted() || ent.Policy == 0 {
 		policy, err := d.InternPolicy(suffix)
 		if err != nil {
 			return nil, err
 		}
-		if ent, _, err = d.Append(string(group), vshard, unsafe.Slice(unsafe.StringData(name), len(name)), policy); err != nil {
+		if ok && !ent.Deleted() {
+			// An entry from before the policy table: record the policy it
+			// is admitted with, so the dictionary alone serves it from now.
+			_, err = d.SetPolicy(string(group), vshard, key, policy)
+		} else {
+			ent, _, err = d.Append(string(group), vshard, key, policy)
+		}
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -215,3 +223,46 @@ func (c *PolicyCatalog) admissionGroup(definition []byte) (partsformat.Group, []
 
 // ID returns the engine ID the handle is registered under.
 func (h *PolicyIdentity) ID() uint64 { return h.id }
+
+// Slot is the identity's process-local row slot (from 1; 0 for a NumericID
+// identity). Producers key their receiver name tables by it.
+func (h *PolicyIdentity) Slot() uint32 { return h.slot }
+
+// SlotIdentity returns the packed identity that holds slot in this process,
+// or nil.
+func (e *coreEngine) SlotIdentity(slot uint32) *ApplicationPolicy {
+	if slot == 0 {
+		return nil
+	}
+	if h := e.identities.rowLookup(uint64(slot)); h != nil && h.slot == slot {
+		return h
+	}
+	return nil
+}
+
+// FindIdentity admits a name the store dictionary already holds, under the
+// policy it was first admitted with and in the group that holds it, so a
+// restart never repeats schema matching for a known name. It returns nil when
+// no live entry exists (or the entry predates the policy table): the caller
+// then resolves today's policy and calls AdmitIdentity.
+func (e *coreEngine) FindIdentity(name string) (*ApplicationPolicy, error) {
+	d := e.identities.partDict()
+	if d == nil {
+		return nil, nil
+	}
+	vshard := partsformat.Route(partsformat.ID(name))
+	key := unsafe.Slice(unsafe.StringData(name), len(name))
+	for i := uint16(1); ; i++ {
+		group, ok := d.Group(i)
+		if !ok {
+			return nil, nil
+		}
+		ent, ok := d.Lookup(group, vshard, key)
+		if !ok || ent.Deleted() {
+			continue
+		}
+		if def, ok := DictionaryDefinition(d, group, vshard, ent.ID); ok {
+			return e.identities.admit(name, def)
+		}
+	}
+}

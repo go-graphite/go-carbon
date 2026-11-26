@@ -71,7 +71,8 @@ type packet struct {
 	seal    bool
 }
 
-// Producer owns its catalog, pending rows and the packets it hands to core.
+// Producer owns its pending rows and the packets it hands to core. Names live
+// in the store dictionary; only a store without one keeps a producer catalog.
 type Producer struct {
 	engine                          *v2core.Engine
 	mirror                          func(int, []v2core.Batch) error
@@ -79,7 +80,8 @@ type Producer struct {
 	catalog                         *partlog.NameCatalog
 	packets                         []packet
 	outboxes                        []*v2core.Outbox            // free; one in steady intake
-	applications                    []*v2core.ApplicationPolicy // by catalog ID, bound by catalogPolicies
+	applications                    []*v2core.ApplicationPolicy // by catalog ID, bound by catalogPolicies (no dictionary)
+	legacyL0                        bool                        // loaded a version-1 L0 batch: retireCatalog seals first
 	cursor                          uint64
 	applyOrder                      uint64
 	journalDir                      string
@@ -215,6 +217,10 @@ func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers 
 			if b.Order <= frontiers[owner][producer] {
 				return false, nil
 			}
+			if v2core.IsPackedID(b.ID) {
+				return true, nil
+			}
+			p.legacyL0 = true
 			if err := p.openCatalog(); err != nil {
 				return false, err
 			}
@@ -226,8 +232,64 @@ func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers 
 		}
 	}
 	e.ResumeMerges()
-
+	if e.Dictionary() != nil {
+		for _, p := range s.Producers {
+			if err := p.retireCatalog(); err != nil {
+				_ = s.Close()
+				return nil, fmt.Errorf("retire producer %d catalog: %w", p.index, err)
+			}
+		}
+	}
 	return s, nil
+}
+
+// dictStore reports a producer whose names live in the store dictionary
+// alone: it writes no catalog, and its local IDs are process-local slots.
+func (p *Producer) dictStore() bool { return p.layer == 3 && p.engine.Dictionary() != nil }
+
+// retireCatalog upgrades a dictionary store that still has the catalog of an
+// older build, once: every catalog name is admitted into the dictionary
+// (appended if missing) under its stored policy, the dictionary is synced,
+// a seal makes any version-1 L0 the catalog mapped durable, and only then is
+// the catalog renamed away and removed. A kill before the rename repeats the
+// mapping, which finds every name already present; a kill after it leaves a
+// directory nothing reads, removed at the next open.
+func (p *Producer) retireCatalog() error {
+	if p.journalDir == "" {
+		return nil
+	}
+	dir, gone := filepath.Join(p.journalDir, "catalog"), filepath.Join(p.journalDir, "catalog.retired")
+	if err := os.RemoveAll(gone); err != nil {
+		return err
+	}
+	if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if err := p.openCatalog(); err != nil {
+		return err
+	}
+	if err := p.engine.Dictionary().Sync(); err != nil {
+		return p.fail(err)
+	}
+	if p.legacyL0 {
+		if err := p.Flush(); err != nil {
+			return err
+		}
+	}
+	err := p.catalog.Close()
+	p.catalog, p.applications, p.legacyL0 = nil, nil, false
+	if err != nil {
+		return p.fail(err)
+	}
+	if err := os.Rename(dir, gone); err != nil {
+		return p.fail(err)
+	}
+	if err := syncDir(p.journalDir); err != nil {
+		return p.fail(err)
+	}
+	return p.fail(os.RemoveAll(gone))
 }
 
 // openCatalog runs on the producer's serial caller, on recovery only if a

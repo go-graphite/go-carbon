@@ -56,17 +56,18 @@ func (e *FutureTimestampError) Error() string {
 	return fmt.Sprintf("timestamp %d is beyond the future limit (admission clock %d)", e.Timestamp, e.Clock)
 }
 
-// applicationOwner maps a name to its producer-local catalog ID with one
-// namefp.Table probe keyed by the name's 96-bit fingerprint. No name bytes are
-// read or kept. A miss checks the producer catalog first; only a name absent
-// there resolves its admission policy and registers a new identity.
+// applicationOwner maps a name to its local ID (the identity's row slot in a
+// dictionary store, else its producer catalog ID) with one namefp.Table probe
+// keyed by the name's 96-bit fingerprint. No name bytes are read or kept. A
+// miss checks the store dictionary (or the producer catalog) first; only a
+// name absent there resolves its admission policy and registers a new identity.
 type applicationOwner struct {
 	p        *Producer
 	resolve  PolicyResolver
 	throttle func(*points.Points, bool) bool
 	reject   func(name string, err error) // one refused point; nil ignores
 	future   int64                        // seconds a point may lead its batch clock; 0 = no limit
-	names    namefp.Table                 // fingerprint → producer-local catalog ID
+	names    namefp.Table                 // fingerprint → local ID
 	apps     []Application
 	sequence []uint64
 }
@@ -83,11 +84,20 @@ func (o *applicationOwner) register(name string, fp namefp.Fingerprint) (uint32,
 	}
 	// Recovered producers open on first demand. Resolve persisted names before
 	// consulting today's admission policy, as an eagerly opened catalog did.
-	if err := o.p.openCatalog(); err != nil {
-		return 0, err
-	}
 	var id uint64
-	if o.p.mirror == nil {
+	if o.p.dictStore() {
+		if o.p.mirror == nil {
+			h, err := o.p.engine.FindIdentity(name)
+			if err != nil {
+				return 0, err
+			}
+			if h != nil {
+				id = uint64(h.Slot())
+			}
+		}
+	} else if err := o.p.openCatalog(); err != nil {
+		return 0, err
+	} else if o.p.mirror == nil {
 		id = o.p.catalog.Find(name)
 	}
 	if id != 0 {
@@ -178,7 +188,7 @@ func (o *applicationOwner) appendNames(names []string, text []byte, ends []int, 
 			if local == 0 {
 				name = string(raw)
 			} else if o.throttle != nil {
-				name = o.p.applications[local].Name() // quota checks reuse the catalog string
+				name = o.p.handle(uint64(local)).Name() // quota checks reuse the identity's string
 			}
 		}
 		if o.throttle != nil && o.throttle(&points.Points{Metric: name, Data: data[i : i+1]}, false) {
@@ -199,7 +209,7 @@ func (o *applicationOwner) appendNames(names []string, text []byte, ends []int, 
 		index := len(apps)
 		order := o.p.applyOrder + uint64(index) + 1
 		o.sequence[index] = order
-		apps = append(apps, Application{Registered: o.p.applications[local], LocalID: uint64(local), Order: order, Clock: clock, Points: data[i : i+1], Sequence: o.sequence[index : index+1 : index+1]})
+		apps = append(apps, Application{Registered: o.p.handle(uint64(local)), LocalID: uint64(local), Order: order, Clock: clock, Points: data[i : i+1], Sequence: o.sequence[index : index+1 : index+1]})
 	}
 	if len(apps) == 0 {
 		return nil

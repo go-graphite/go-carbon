@@ -54,7 +54,7 @@ func TestCatalogFoldDictOnlyL0Kill(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, name := range names {
-			fmt.Printf("ID %s %d\n", name, p.applications[p.catalog.Find(name)].ID())
+			fmt.Printf("ID %s %d\n", name, knownIdentity(nil, p, name).ID())
 		}
 		armed.Store(true)
 		if err = p.Drain(); err != nil {
@@ -166,7 +166,7 @@ func TestCatalogFoldDictOnlyL0Kill(t *testing.T) {
 	if err = p.AppendApplications([]Application{admitApp(t, "fold.b", 10)}); err != nil {
 		t.Fatal(err)
 	}
-	if got := p.applications[p.catalog.Find("fold.b")].ID(); got != want["fold.b"] {
+	if got := knownIdentity(t, p, "fold.b").ID(); got != want["fold.b"] {
 		t.Fatalf("fold.b re-admitted under %#x, want %#x", got, want["fold.b"])
 	}
 }

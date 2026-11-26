@@ -49,19 +49,12 @@ func dictDir(root string) string {
 func admitted(t *testing.T, s *Store, name string) (*v2core.ApplicationPolicy, uint32) {
 	t.Helper()
 	p := s.Producers[0]
-	local := p.catalog.Find(name)
-	if local == 0 {
-		t.Fatalf("%s not in the catalog", name)
-	}
-	h := p.applications[local]
+	h := knownIdentity(t, p, name)
 	id, ok := h.DictID()
 	if !ok {
 		t.Fatalf("%s has no dictionary ID after its drain", name)
 	}
-	_, def, ok := p.catalog.Lookup(local)
-	if !ok {
-		t.Fatalf("%s: catalog lookup failed", name)
-	}
+	def := admitPolicy(t, name)
 	got, ok := h.DictionaryDefinition()
 	if !ok || !bytes.Equal(got, def) || !bytes.Equal(got, h.Definition()) || !bytes.Equal(def, admitPolicy(t, name)) {
 		t.Fatalf("%s: dictionary definition %q ok=%v, catalog %q", name, got, ok, def)
@@ -100,7 +93,7 @@ func TestAdmissionAssignsDictionaryIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Admission assigns the packed dictionary ID; the drain makes it durable.
-	if h := p.applications[1]; h == nil || h.NeedsDictID() || !v2core.IsPackedID(h.ID()) {
+	if h := knownIdentity(t, p, apps[0].Name); h == nil || h.NeedsDictID() || !v2core.IsPackedID(h.ID()) {
 		t.Fatal("a new name has no packed dictionary ID at admission")
 	}
 	if err = p.Drain(); err != nil {
@@ -362,15 +355,33 @@ func TestAdmissionOldDictionary(t *testing.T) {
 	if err = p.Drain(); err != nil {
 		t.Fatal(err)
 	}
-	h := p.applications[p.catalog.Find(name)]
+	h := knownIdentity(t, p, name)
 	id, ok := h.DictID()
 	if !ok || id != e.ID {
 		t.Fatalf("old name got ID %d ok=%v, want %d", id, ok, e.ID)
 	}
-	if def, ok := h.DictionaryDefinition(); ok {
-		t.Fatalf("policy-0 entry served a dictionary definition %q", def)
+	// Admission records the policy on the old entry: the dictionary alone
+	// serves the name from now on.
+	if def, ok := h.DictionaryDefinition(); !ok || !bytes.Equal(def, admitPolicy(t, name)) {
+		t.Fatalf("policy-0 entry did not get its admitted policy: %q ok=%v", def, ok)
 	}
 	if !bytes.Equal(h.Definition(), admitPolicy(t, name)) {
 		t.Fatal("catalog definition changed")
 	}
+}
+
+// knownIdentity returns the identity the store holds for name: from the
+// dictionary in a dictionary store, from the catalog otherwise.
+func knownIdentity(t *testing.T, p *Producer, name string) *v2core.ApplicationPolicy {
+	if p.dictStore() {
+		h, err := p.engine.FindIdentity(name)
+		if err != nil || h == nil {
+			if t == nil {
+				panic(fmt.Sprintf("%s not in the dictionary: %v", name, err))
+			}
+			t.Fatalf("%s not in the dictionary: %v", name, err)
+		}
+		return h
+	}
+	return p.applications[p.catalog.Find(name)]
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,7 +16,7 @@ import (
 )
 
 // A recovered ID-keyed identity already has its canonical definition validated
-// by catalog.Intern. Filling the producer's empty handle slot must not decode
+// by its first admission. Re-registering after a restart must not decode
 // and allocate its dictionary name once more than the cached-slot path does.
 func TestRecoveredRegistrationReusesBoundHandle(t *testing.T) {
 	v2part.IDKeys.Store(true)
@@ -49,22 +51,19 @@ func TestRecoveredRegistrationReusesBoundHandle(t *testing.T) {
 		}
 	}()
 	p = s.Producers[0]
-	if len(p.applications) > 1 && p.applications[1] != nil {
-		t.Fatal("fixture already has a producer handle")
-	}
 	if p.catalog != nil {
-		t.Fatal("sealed restart eagerly opened producer catalog")
+		t.Fatal("dictionary store opened a producer catalog")
 	}
-	if err := p.openCatalog(); err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(filepath.Join(p.journalDir, "catalog")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("dictionary store wrote a catalog: %v", err)
 	}
-	want := p.applications[1]
-	if want == nil {
-		t.Fatal("catalog recovery did not bind the identity")
+	want, err := s.Core.FindIdentity(name)
+	if err != nil || want == nil {
+		t.Fatalf("restart lost the identity: %v", err)
 	}
 	check := func() {
 		h, id, err := p.RegisterApplication(name, raw)
-		if err != nil || id != 1 || h != want {
+		if err != nil || id != uint64(want.Slot()) || h != want {
 			t.Fatalf("registration changed identity: id=%d same=%v err=%v", id, h == want, err)
 		}
 	}
@@ -106,8 +105,8 @@ func TestRecoveredRegistrationReusesBoundHandle(t *testing.T) {
 	if err := o.Append([]string{"brand.new.name"}, nil, data, nil, 1010); err != nil {
 		t.Fatal(err)
 	}
-	if calls != 1 || rejected != 1 || p.catalog.Count() != 1 || p.pendingRows != 0 {
-		t.Fatalf("new admission bypassed resolver: calls=%d rejected=%d catalog=%d pending=%d", calls, rejected, p.catalog.Count(), p.pendingRows)
+	if fresh, _ := s.Core.FindIdentity("brand.new.name"); calls != 1 || rejected != 1 || fresh != nil || p.pendingRows != 0 {
+		t.Fatalf("new admission bypassed resolver: calls=%d rejected=%d admitted=%v pending=%d", calls, rejected, fresh != nil, p.pendingRows)
 	}
 	// Exercise the recovered handle through pending classification and the
 	// installed fingerprint table, then recover its sealed metadata again.
@@ -159,8 +158,8 @@ func TestRecoveredRegistrationReusesBoundHandle(t *testing.T) {
 	if err := coldReceiver.Append([]string{name}, nil, probePoints(1), nil, 1030); err != nil {
 		t.Fatal(err)
 	}
-	if p.catalog == nil || p.pendingRows != 0 || coldReceiver.names.Len() != 1 {
-		t.Fatal("cold intake did not open and reuse the persisted catalog")
+	if p.catalog != nil || p.pendingRows != 0 || coldReceiver.names.Len() != 1 {
+		t.Fatal("cold intake did not reuse the dictionary's persisted policy")
 	}
 }
 
