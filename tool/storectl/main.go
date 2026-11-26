@@ -62,6 +62,8 @@ func run(args []string) error {
 			return maintain(args[1:])
 		case "inventory":
 			return inventoryMain(args[1:])
+		case "clone":
+			return cloneMain(args[1:])
 		}
 	}
 	return downsize.MainWithMetrics(args, version())
