@@ -561,3 +561,30 @@ func TestOutboxRoutesApplications(t *testing.T) {
 		}
 	}
 }
+
+// A short packet after an admission burst must release the burst's arrays,
+// and subsequent applications must still preserve their encoded order/points.
+func TestPendingRowsReuseAfterBurst(t *testing.T) {
+	var p pendingRows
+	p.startApplication(1, 100, 100, 16384)
+	for i := range 16384 {
+		p.addRow(7, 100, uint64(i), uint64(i+1))
+	}
+	p.closePacket()
+	p.reset()
+	p.startApplication(20000, 100, 100, 1)
+	p.addRow(7, 100, 42, 20000)
+	p.closePacket()
+	p.reset()
+	if cap(p.rows) > 2048 || cap(p.seqs) > 2048 || cap(p.deltas) > 2048 {
+		t.Fatal("admission burst arrays retained after a short released packet")
+	}
+	p.startApplication(30000, 101, 101, 2)
+	p.addRow(7, 101, 43, 30000)
+	p.addRow(7, 102, 44, 30001)
+	p.closePacket()
+	got := p.decodeFrom(func(uint64) *ApplicationPolicy { return nil })
+	if len(got) != 1 || len(got[0].Points) != 2 || got[0].Points[0].Bits != 43 || got[0].Points[1].Bits != 44 || got[0].Points[1].Seq != 30001 {
+		t.Fatalf("reused packet changed: %+v", got)
+	}
+}

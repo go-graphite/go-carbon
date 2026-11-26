@@ -115,6 +115,7 @@ func (o *applicationOwner) appendNames(names []string, text []byte, ends []int, 
 	o.apps = slices.Grow(o.apps[:0], len(data))
 	o.sequence = slices.Grow(o.sequence[:0], len(data))[:len(data)]
 	apps := o.apps[:0]
+	admitted := o.names.Len()
 	defer func() { clear(apps); o.apps = apps[:0] }()
 	var previous namefp.Fingerprint
 	var local uint32 // 0 until the first admitted name: catalog IDs start at 1
@@ -178,7 +179,15 @@ func (o *applicationOwner) appendNames(names []string, text []byte, ends []int, 
 	if len(apps) == 0 {
 		return nil
 	}
-	return o.p.AppendApplications(apps)
+	if err := o.p.AppendApplications(apps); err != nil {
+		return err
+	}
+	// A first admission must not stack the producer drain tick behind the
+	// receiver batch wait. Established names retain ordinary grouped writes.
+	if o.names.Len() != admitted {
+		return o.p.Drain()
+	}
+	return nil
 }
 
 // Ordinary ticks sync the journal; only maintenance requires a core frontier.

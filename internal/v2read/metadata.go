@@ -264,8 +264,8 @@ func (r *Reader) Masked(ctx context.Context, name string) (bool, error) {
 }
 
 // AwaitHydration fences find's projected names on their physical owners. With
-// no names (directory or negative lookup) it fences every owner. Render and
-// metadata requests also fence selected owners in forNames.
+// no names (directory or negative lookup) it fences every owner. Exact render
+// and metadata requests validate only their requested immutable rows.
 func (r *Reader) AwaitHydration(ctx context.Context, names ...string) error {
 	pins, err := r.loadOwners(ctx)
 	if err != nil {

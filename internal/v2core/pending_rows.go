@@ -211,6 +211,19 @@ func (p *pendingRows) closePacket() {
 }
 
 func (p *pendingRows) reset() {
+	// A slow admission or journal sync can grow a producer packet far beyond
+	// steady demand. Released dispatch leases keep those arrays across GC;
+	// retain two packets of headroom, rather than every warm-up high-water mark.
+	keep := 2 * max(1024, len(p.rows))
+	if cap(p.rows) > keep {
+		p.rows = nil
+	}
+	if cap(p.deltas) > keep {
+		p.deltas = nil
+	}
+	if cap(p.seqs) > keep {
+		p.seqs = nil
+	}
 	p.rows, p.packets, p.deltas, p.seqs, p.escapes = p.rows[:0], p.packets[:0], p.deltas[:0], p.seqs[:0], p.escapes[:0]
 	p.open, p.lastOrder = false, 0
 }

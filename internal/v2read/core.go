@@ -576,15 +576,14 @@ func (r *Reader) viewsForNames(ctx context.Context, pinned []*generation, names 
 // forNames creates request-local metadata; no request waits for a whole-store
 // generation loader. The caller retains the publication through this call.
 func (g *generation) forNames(ctx context.Context, names []string, st *stageCounters) (*generation, error) {
-	if err := g.inventory.AwaitHydration(ctx); err != nil {
-		return nil, err
-	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if g.parts == nil {
 		return g.discover(ctx)
 	}
+	// The immutable descriptor and exact name lookup validate these rows without
+	// rebuilding the owner's writable inventory. Discovery still needs its fence.
 	stage := time.Now()
 	index, err := g.parts.SnapshotForNames(ctx, g.snapshot, names, g.cache.ranges)
 	st.observe(StageSnapshot, stage)

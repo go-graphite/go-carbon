@@ -39,6 +39,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"unsafe"
+
+	"github.com/zeebo/xxh3"
 )
 
 // FlagDeleted marks a deleted (expired) name. The ID is never reused.
@@ -387,9 +389,10 @@ func (d *Dict) getLocked(sh *shard, key []byte) (Entry, bool) {
 }
 
 func getLevels(levels []*level, key []byte) (Entry, bool) {
+	h := xxh3.Hash(key) // one hash for every immutable level probe
 	for i := len(levels) - 1; i >= 0; i-- {
-		if v := levels[i].get(key); v != nil {
-			return decode(v), true
+		if e, ok := levels[i].getHashed(key, h); ok {
+			return e, true
 		}
 	}
 	return Entry{}, false
@@ -449,8 +452,7 @@ func (d *Dict) LookupID(group string, vshard uint16, id uint32, dst []byte) ([]b
 		if pos < 0 {
 			continue
 		}
-		key, val := l.at(pos, kb[:0])
-		e := decode(val)
+		key, e := l.at(pos, kb[:0])
 		// Only newer storage can hold a newer entry of the same name.
 		sh.mu.RLock()
 		v := sh.buf.get(key)
@@ -819,7 +821,7 @@ func (d *Dict) freeze(force bool) error {
 // the frozen level's place and removes the logs it covers.
 func (d *Dict) writeFrozen(frozen []*memtable, minSeq, maxSeq uint64) {
 	defer d.flushWG.Done()
-	l, err := writeLevel(levelPath(d.dir, minSeq, maxSeq), minSeq, maxSeq, func(w *levelWriter) {
+	l, err := writeLevelKind(levelPath(d.dir, minSeq, maxSeq), minSeq, maxSeq, false, func(w *levelWriter) {
 		// Shards hold disjoint scopes: one key order over all of them.
 		n := 0
 		for _, t := range frozen {
@@ -837,6 +839,7 @@ func (d *Dict) writeFrozen(frozen []*memtable, minSeq, maxSeq uint64) {
 			kb, _ := rec(b)
 			return bytes.Compare(ka, kb)
 		})
+		w.reserve(len(order))
 		for _, x := range order {
 			w.add(rec(x))
 		}
