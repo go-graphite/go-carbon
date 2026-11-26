@@ -90,6 +90,25 @@ func TestIDKeyedSealDifferential(t *testing.T) {
 					return 0
 				}
 				compare := func(epoch int64) {
+					// Exercise the on-disk dictionary codec, including restart/merge
+					// reads; a small fixture otherwise remains only in the append level.
+					if err := engines[1].dict.Flush(); err != nil {
+						t.Fatal(err)
+					}
+					// A second scope makes the first comparison compact two real
+					// flush runs; later comparisons retain the merged dictionary.
+					if _, _, err := engines[1].dict.Append("codec-fixture", 0, []byte("merge"), 0); err != nil {
+						t.Fatal(err)
+					}
+					if err := engines[1].dict.Flush(); err != nil {
+						t.Fatal(err)
+					}
+					if err := engines[1].dict.MergeAll(); err != nil {
+						t.Fatal(err)
+					}
+					if engines[1].dict.Stats().Levels == 0 {
+						t.Fatal("dictionary stayed in memory")
+					}
 					snapshots := []*RollupSnapshot{}
 					for _, e := range engines {
 						s := e.owners[0].db.NewSnapshot()

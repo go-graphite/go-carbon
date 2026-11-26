@@ -277,10 +277,11 @@ type coreOwner struct {
 	sealDurable bool
 	// L0 files found at open (LoadL0 consumes them), the next file number,
 	// the owner goroutine's encode buffer and bytes written.
-	l0Files []string
-	l0Next  uint64
-	l0Buf   []byte
-	l0Bytes atomic.Uint64
+	l0Files     []string
+	l0Next      uint64
+	l0Buf       []byte
+	l0LastBytes int // previous publication size, for encode-buffer reuse
+	l0Bytes     atomic.Uint64
 }
 type coreFailure struct{ err error }
 type coreEngine struct {

@@ -214,7 +214,13 @@ func (p *Producer) openCatalog() error {
 	}
 	var err error
 	if p.layer == 3 {
-		p.catalog, err = partlog.OpenNameCatalog(filepath.Join(p.journalDir, "catalog"), catalogPolicies{engine: p.engine, producer: p.index, producers: p.count})
+		recovery := p.engine.NewPolicyRecovery()
+		binding := &catalogPolicies{engine: p.engine, producer: p.index, producers: p.count, recovery: recovery}
+		p.catalog, err = partlog.OpenNameCatalog(filepath.Join(p.journalDir, "catalog"), binding)
+		if err == nil {
+			err = recovery.Finish()
+		}
+		binding.recovery = nil
 	} else {
 		p.catalog, err = partlog.OpenNameCatalog(filepath.Join(p.journalDir, "catalog"))
 	}

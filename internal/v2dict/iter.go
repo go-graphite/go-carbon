@@ -156,6 +156,11 @@ func (it *Iter) Entry() Entry { return decode(it.val[:]) }
 // vshard move.
 func (d *Dict) Scan(group string, vshard uint16, prefix []byte, fn func(name []byte, e Entry) bool) {
 	it := d.NewIter(group, vshard)
+	var decoder scanDecoder
+	defer decoder.close()
+	for i := range it.lv {
+		it.lv[i].decoder = &decoder
+	}
 	for ok := it.SeekGE(prefix); ok && bytes.HasPrefix(it.Name(), prefix); ok = it.Next() {
 		if !fn(it.Name(), it.Entry()) {
 			return
@@ -261,6 +266,21 @@ func pickMerge(levels []*level, fanout int) int {
 	return -1
 }
 
+// mergeStart preserves compact prefixes unless the normal fanout requires them.
+// With no fanout merge due, compress only the uncompressed suffix. Selecting
+// L2 before writing avoids a second full L1 output and needs no admission timer.
+func mergeStart(levels []*level, fanout int) int {
+	if i := pickMerge(levels, fanout); i >= 0 {
+		return i
+	}
+	for i, l := range levels {
+		if !l.compact {
+			return i
+		}
+	}
+	return -1
+}
+
 func (d *Dict) maybeMerge() {
 	if d.opt.NoMerge || !d.merging.CompareAndSwap(false, true) {
 		return
@@ -275,7 +295,7 @@ func (d *Dict) maybeMerge() {
 			d.mu.RLock()
 			stop := d.closed || d.err != nil // a failed merge is not retried in a loop
 			d.mu.RUnlock()
-			if stop || pickMerge(d.snap.Load().levels, d.opt.Fanout) < 0 || !d.merging.CompareAndSwap(false, true) {
+			if stop || mergeStart(d.snap.Load().levels, d.opt.Fanout) < 0 || !d.merging.CompareAndSwap(false, true) {
 				return
 			}
 		}
@@ -303,16 +323,21 @@ func (d *Dict) MergeAll() error {
 
 func (d *Dict) mergeOnce() bool {
 	levels := d.snap.Load().levels
-	i := pickMerge(levels, d.opt.Fanout)
+	i := mergeStart(levels, d.opt.Fanout)
 	if i < 0 {
 		return false
 	}
-	return d.merge(levels[i:]) == nil
+	return d.mergeKind(levels[i:], true) == nil
 }
 
 // merge writes the newest entry of every key of in (sequence-adjacent
 // levels) to one level, installs it in their place and removes them.
-func (d *Dict) merge(in []*level) error {
+func (d *Dict) merge(in []*level) error { return d.mergeKind(in, true) }
+
+func (d *Dict) mergeKind(in []*level, compact bool) error {
+	if len(in) == 0 {
+		return nil
+	}
 	d.mergeMu.Lock()
 	defer d.mergeMu.Unlock()
 	d.mu.RLock()
@@ -327,7 +352,12 @@ func (d *Dict) merge(in []*level) error {
 		its[i].next()
 	}
 	var cur []byte
-	out, err := writeLevel(levelPath(d.dir, in[0].minSeq, in[len(in)-1].maxSeq), in[0].minSeq, in[len(in)-1].maxSeq, func(w *levelWriter) {
+	out, err := writeLevelKind(levelPath(d.dir, in[0].minSeq, in[len(in)-1].maxSeq), in[0].minSeq, in[len(in)-1].maxSeq, compact, func(w *levelWriter) {
+		n := 0
+		for _, l := range in {
+			n += l.n
+		}
+		w.reserve(n)
 		for {
 			best := -1
 			for i := len(its) - 1; i >= 0; i-- {
@@ -360,7 +390,11 @@ func (d *Dict) merge(in []*level) error {
 	at := slices.Index(cur2, in[0])
 	if d.closed || at < 0 || len(cur2) < at+len(in) || !slices.Equal(cur2[at:at+len(in)], in) {
 		d.mu.Unlock()
-		os.Remove(out.path)
+		// A single-level rewrite has already replaced its input at this path.
+		// Preserve that equivalent durable file if Close wins publication.
+		if out.path != in[0].path {
+			os.Remove(out.path)
+		}
 		return fmt.Errorf("v2dict: merge inputs changed")
 	}
 	next := slices.Concat(cur2[:at], []*level{out}, cur2[at+len(in):])
@@ -370,7 +404,9 @@ func (d *Dict) merge(in []*level) error {
 		return err
 	}
 	for _, l := range in {
-		os.Remove(l.path)
+		if l.path != out.path {
+			os.Remove(l.path)
+		}
 	}
 	return nil
 }
