@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestL0DirOutsideRoot covers an L0 directory outside root (v2.l0-dir on
@@ -25,8 +26,14 @@ func TestL0DirOutsideRoot(t *testing.T) {
 	if err = s.Producers[0].Drain(); err != nil {
 		t.Fatal(err)
 	}
-	if files, _ := filepath.Glob(filepath.Join(cfg.L0Dir, "owner-000", "l0-*")); len(files) == 0 {
-		t.Fatal("published rows wrote no L0 file under L0Dir")
+	// The owner writes the run file at its next publication, not in Drain.
+	for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if files, _ := filepath.Glob(filepath.Join(cfg.L0Dir, "owner-000", "l0-*")); len(files) != 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("published rows wrote no L0 file under L0Dir")
+		}
 	}
 	if files, _ := filepath.Glob(filepath.Join(root, "*", "core", "*", "l0", "*")); len(files) != 0 {
 		t.Fatalf("L0 files under root: %v", files)
