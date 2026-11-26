@@ -14,6 +14,7 @@ import (
 
 	"github.com/go-graphite/go-carbon/internal/partlog"
 	"github.com/go-graphite/go-carbon/internal/v2core"
+	"github.com/go-graphite/go-carbon/internal/v2recv"
 	"github.com/go-graphite/go-carbon/points"
 	"golang.org/x/sync/errgroup"
 )
@@ -205,7 +206,10 @@ func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers 
 		// owner's frontier is the last order of each producer it sealed.
 		frontiers := e.DurableFrontiers()
 		err := e.LoadL0(func(owner int, b *v2core.Batch) (bool, error) {
-			producer := int((b.ID - 1) % uint64(c.Producers))
+			producer, err := l0Producer(e, b.ID, c.Producers)
+			if err != nil {
+				return false, err
+			}
 			p := s.Producers[producer]
 			p.applyOrder = max(p.applyOrder, b.Order)
 			p.cursor = p.applyOrder
@@ -258,6 +262,20 @@ func (p *Producer) fail(err error) error {
 		p.failed = err
 	}
 	return p.failed
+}
+
+// l0Producer returns the producer whose order an L0 batch carries. A
+// NumericID encodes it; a packed dictionary ID names the metric, and the
+// receiver routes each name to producer OwnerFor(name).
+func l0Producer(e *v2core.Engine, id uint64, producers int) (int, error) {
+	if !v2core.IsPackedID(id) {
+		return int((id - 1) % uint64(producers)), nil
+	}
+	name, ok := e.PackedName(id)
+	if !ok {
+		return 0, fmt.Errorf("L0 application %#x has no dictionary name", id)
+	}
+	return v2recv.OwnerFor(name, producers), nil
 }
 
 // NumericID is an injective mapping of persisted stream-local IDs. It is not a hash.

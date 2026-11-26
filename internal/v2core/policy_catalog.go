@@ -79,6 +79,9 @@ type PolicyCatalog struct {
 	// dict is the store name dictionary that ID-keyed parts resolve through
 	// (id_keys.go); nil while the store writes name-keyed parts only.
 	dict atomic.Pointer[v2dict.Dict]
+	// packed holds identities under packed dictionary IDs (packed_id.go),
+	// dense per (group, vshard).
+	packed packedPages
 }
 type policyCatalogShard struct {
 	mu        sync.Mutex
@@ -216,8 +219,15 @@ func policyIdentityMatches(old *PolicyIdentity, name string, definition []byte) 
 }
 
 func (c *PolicyCatalog) publish(h *PolicyIdentity) (*PolicyIdentity, error) {
-	p := c.idPage(h.id>>10, true)
-	slot := &p[h.id&1023]
+	var slot *atomic.Pointer[PolicyIdentity]
+	if IsPackedID(h.id) {
+		if !c.packedMatches(h) {
+			return nil, errors.New("v2core: packed ID names another group or vshard")
+		}
+		slot = c.packedSlot(h.id, true)
+	} else {
+		slot = &c.idPage(h.id>>10, true)[h.id&1023]
+	}
 	if slot.CompareAndSwap(nil, h) {
 		return h, nil
 	}
@@ -361,6 +371,12 @@ func (c *PolicyCatalog) idPage(id uint64, create bool) *policyIDPage {
 }
 
 func (c *PolicyCatalog) lookup(id uint64) *PolicyIdentity {
+	if IsPackedID(id) {
+		if slot := c.packedSlot(id, false); slot != nil {
+			return slot.Load()
+		}
+		return nil
+	}
 	if p := c.idPage(id>>10, false); p != nil {
 		return p[id&1023].Load()
 	}

@@ -134,7 +134,7 @@ func TestPolicyCatalogSharedSchemasAndPagedIDs(t *testing.T) {
 			t.Fatal("published handle changed")
 		}
 	}
-	for _, id := range []uint64{1023, 1024, 1025, ^uint64(0)} {
+	for _, id := range []uint64{1023, 1024, 1025, 1<<62 + 5} { // 2^63 and up is the packed space
 		name := fmt.Sprintf("page.metric.%d", id)
 		_, raw := rollupTestPolicy(t, name, "1s:1d", sealrollup.Last, .5)
 		h, err := c.intern(id, name, raw)
