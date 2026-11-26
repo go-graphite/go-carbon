@@ -24,8 +24,9 @@ import (
 // filter version + block entry count (u32) | data blocks | block offsets (u64) | ID column |
 // scope table | cache-line Bloom filter + CRC32C | footer
 //
-// A data block stores its first key uncompressed, its raw length, and a Zstd(3)
-// frame of front-coded entries. Binary search compares only uncompressed first
+// A data block stores its first key uncompressed, its raw length, and an LZ4
+// block of front-coded entries (raw bytes when compression does not shrink it).
+// Binary search compares only uncompressed first
 // keys; a lookup decompresses one block. Iterators reuse the current block until
 // they advance. Scratch buffers contain no cached blocks across lookups.
 // Entries store a tagged varint ID, with policy u16 / flags u8 only if nonzero.
@@ -42,8 +43,8 @@ const (
 	legacyLevelMagic    = "v2dictL1"
 	footerSize          = 4*8 + 8
 	blockEntries        = 32
-	defaultBlockEntries = 128
-	filterVersion       = 2 << 16 // cache-line Bloom layout; old experimental L2 rejects it
+	defaultBlockEntries = 32
+	filterVersion       = 3 << 16 // cache-line Bloom layout + LZ4; reject experimental Zstd L2
 	valueSize           = 7       // ID u32, policy u16, flags u8, little endian
 	// keyBuf is the stack buffer a lookup builds its key in; only a longer
 	// key (scope and name) allocates.
@@ -99,10 +100,6 @@ func (l *level) first(b int) []byte {
 var blockScratch = sync.Pool{New: func() any { b := make([]byte, 32<<10); return &b }}
 
 func (l *level) readBlock(b int, dst []byte) []byte {
-	return l.readBlockWithDecoder(b, dst, nil)
-}
-
-func (l *level) readBlockWithDecoder(b int, dst []byte, decoder *scanDecoder) []byte {
 	off, end := l.block(b), l.dataLen
 	if b+1 < l.nb {
 		end = l.block(b + 1)
@@ -123,13 +120,7 @@ func (l *level) readBlockWithDecoder(b int, dst []byte, decoder *scanDecoder) []
 	if cap(dst) < int(raw) {
 		dst = make([]byte, int(raw))
 	}
-	var out []byte
-	var err error
-	if decoder == nil {
-		out, err = decompressBlock(dst[:int(raw)], l.m[off:end])
-	} else {
-		out, err = decoder.decode(dst[:int(raw)], l.m[off:end])
-	}
+	out, err := decompressBlock(dst[:int(raw)], l.m[off:end])
 	if err != nil || len(out) != int(raw) {
 		panic(fmt.Errorf("%w: block %d: %v", errCorrupt, b, err))
 	}
@@ -150,7 +141,6 @@ type levelIter struct {
 	value   [valueSize]byte
 	data    []byte
 	scratch []byte
-	decoder *scanDecoder
 }
 
 func (it *levelIter) next() bool {
@@ -159,7 +149,7 @@ func (it *levelIter) next() bool {
 		return false
 	}
 	if it.i%it.l.blockN == 0 {
-		it.data = it.l.readBlockWithDecoder(it.i/it.l.blockN, it.scratch, it.decoder)
+		it.data = it.l.readBlock(it.i/it.l.blockN, it.scratch)
 		if it.l.compact {
 			it.scratch = it.data
 		}

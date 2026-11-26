@@ -68,14 +68,11 @@ func TestCompressedBlocks(t *testing.T) {
 				t.Fatal(err)
 			}
 			offset := l.block(0) + 1
-			// The frame is immediately after first key + its two framing varints.
-			offset += len(l.first(0))
-			// Find it by its standard Zstandard magic (not an implementation decoder).
-			frame := bytes.Index(l.m[offset:l.block(1)], []byte{0x28, 0xb5, 0x2f, 0xfd})
-			if frame < 0 {
-				t.Fatal("missing compressed frame")
-			}
-			if _, err = f.WriteAt([]byte{0}, int64(offset+frame)); err != nil {
+			_, k := binary.Uvarint(l.m[offset:])
+			offset += k + len(l.first(0))
+			_, k = binary.Uvarint(l.m[offset:])
+			offset += k // compressed block follows the first key and raw length
+			if _, err = f.WriteAt([]byte{0}, int64(offset)); err != nil {
 				t.Fatal(err)
 			}
 			f.Close()
@@ -95,7 +92,7 @@ func TestCompressedIndexValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, mutation := range []string{"zero block count", "oversize block count", "first offset", "last offset"} {
+	for _, mutation := range []string{"zero block count", "oversize block count", "first offset", "last offset", "old codec"} {
 		t.Run(mutation, func(t *testing.T) {
 			data := bytes.Clone(l.m)
 			switch mutation {
@@ -107,6 +104,8 @@ func TestCompressedIndexValidation(t *testing.T) {
 				binary.LittleEndian.PutUint64(data[l.dataLen:], 0)
 			case "last offset":
 				binary.LittleEndian.PutUint64(data[l.dataLen+8*(l.nb-1):], uint64(len(data)))
+			case "old codec":
+				binary.LittleEndian.PutUint32(data, 2<<16|uint32(l.blockN))
 			}
 			path := filepath.Join(t.TempDir(), "bad.lvl")
 			if err := os.WriteFile(path, data, 0644); err != nil {
