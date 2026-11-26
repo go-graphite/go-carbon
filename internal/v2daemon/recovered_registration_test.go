@@ -63,7 +63,7 @@ func TestRecoveredRegistrationReusesBoundHandle(t *testing.T) {
 	}
 	check := func() {
 		h, id, err := p.RegisterApplication(name, raw)
-		if err != nil || id != uint64(want.Slot()) || h != want {
+		if err != nil || id == 0 || p.handle(id) != h || h != want {
 			t.Fatalf("registration changed identity: id=%d same=%v err=%v", id, h == want, err)
 		}
 	}

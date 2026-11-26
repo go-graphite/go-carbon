@@ -224,22 +224,6 @@ func (c *PolicyCatalog) admissionGroup(definition []byte) (partsformat.Group, []
 // ID returns the engine ID the handle is registered under.
 func (h *PolicyIdentity) ID() uint64 { return h.id }
 
-// Slot is the identity's process-local row slot (from 1; 0 for a NumericID
-// identity). Producers key their receiver name tables by it.
-func (h *PolicyIdentity) Slot() uint32 { return h.slot }
-
-// SlotIdentity returns the packed identity that holds slot in this process,
-// or nil.
-func (e *coreEngine) SlotIdentity(slot uint32) *ApplicationPolicy {
-	if slot == 0 {
-		return nil
-	}
-	if h := e.identities.rowLookup(uint64(slot)); h != nil && h.slot == slot {
-		return h
-	}
-	return nil
-}
-
 // FindIdentity admits a name the store dictionary already holds, under the
 // policy it was first admitted with and in the group that holds it, so a
 // restart never repeats schema matching for a known name. It returns nil when

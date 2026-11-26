@@ -17,9 +17,9 @@ import (
 type Application struct {
 	// Registered replaces Name and Policy after RegisterApplication validates them.
 	Registered *v2core.ApplicationPolicy
-	// LocalID is the local ID returned with Registered: the identity's row
-	// slot in a dictionary store, else the producer catalog ID. It validates
-	// the pair without probing the dictionary or a catalog.
+	// LocalID is the local ID returned with Registered: the producer catalog
+	// ID, or in a dictionary store the producer's bind order. It validates the
+	// pair without probing the dictionary or a catalog.
 	LocalID  uint64
 	Name     string
 	Policy   []byte
@@ -30,7 +30,9 @@ type Application struct {
 }
 
 // RegisterApplication validates canonical identity and collision/definition
-// equality at admission. It retains no caller-owned bytes.
+// equality at admission. It retains no caller-owned bytes. In a dictionary
+// store every call binds a new local ID, so callers register a name once (the
+// receiver's fingerprint table does).
 func (p *Producer) RegisterApplication(name string, policy []byte) (*v2core.ApplicationPolicy, uint64, error) {
 	if p.failed != nil {
 		return nil, 0, p.failed
@@ -43,7 +45,7 @@ func (p *Producer) RegisterApplication(name string, policy []byte) (*v2core.Appl
 		if err != nil {
 			return nil, 0, err
 		}
-		return h, uint64(h.Slot()), nil
+		return h, p.bind(h), nil
 	}
 	if err := p.openCatalog(); err != nil {
 		return nil, 0, err
@@ -64,15 +66,20 @@ func (p *Producer) application(id uint64) (*v2core.ApplicationPolicy, uint64, er
 	return nil, 0, errors.New("application catalog has no bound policy")
 }
 
-// handle returns the identity of a local ID: the row slot in a dictionary
-// store, else the catalog ID.
-func (p *Producer) handle(id uint64) *v2core.ApplicationPolicy {
-	if p.dictStore() {
-		if id > math.MaxUint32 {
-			return nil
-		}
-		return p.engine.SlotIdentity(uint32(id))
+// bind gives a dictionary store identity the next local ID, its index in
+// the producer's dense handle table. Receivers and AppendApplications read
+// that table per point: one sequential slice read, as for catalog IDs, where
+// resolving the identity's row slot read two scattered pages.
+func (p *Producer) bind(h *v2core.ApplicationPolicy) uint64 {
+	if len(p.applications) == 0 {
+		p.applications = append(p.applications, nil) // local IDs start at 1
 	}
+	p.applications = append(p.applications, h)
+	return uint64(len(p.applications) - 1)
+}
+
+// handle returns the identity bound to a local ID.
+func (p *Producer) handle(id uint64) *v2core.ApplicationPolicy {
 	if id < uint64(len(p.applications)) {
 		return p.applications[id]
 	}
@@ -118,7 +125,11 @@ func (p *Producer) AppendApplications(apps []Application) error {
 		registered, id := a.Registered, a.LocalID
 		if registered == nil {
 			var err error
-			registered, id, err = p.RegisterApplication(a.Name, a.Policy)
+			if p.dictStore() {
+				registered, err = p.engine.AdmitIdentity(a.Name, a.Policy) // binds no local ID
+			} else {
+				registered, id, err = p.RegisterApplication(a.Name, a.Policy)
+			}
 			if err != nil {
 				return p.fail(err)
 			}

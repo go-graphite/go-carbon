@@ -80,7 +80,7 @@ type Producer struct {
 	catalog                         *partlog.NameCatalog
 	packets                         []packet
 	outboxes                        []*v2core.Outbox            // free; one in steady intake
-	applications                    []*v2core.ApplicationPolicy // by catalog ID, bound by catalogPolicies (no dictionary)
+	applications                    []*v2core.ApplicationPolicy // by local ID: catalog ID (catalogPolicies) or dictionary bind order (bind)
 	legacyL0                        bool                        // loaded a version-1 L0 batch: retireCatalog seals first
 	cursor                          uint64
 	applyOrder                      uint64
@@ -244,7 +244,7 @@ func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers 
 }
 
 // dictStore reports a producer whose names live in the store dictionary
-// alone: it writes no catalog, and its local IDs are process-local slots.
+// alone: it writes no catalog, and its local IDs are process-local bind order.
 func (p *Producer) dictStore() bool { return p.layer == 3 && p.engine.Dictionary() != nil }
 
 // retireCatalog upgrades a dictionary store that still has the catalog of an

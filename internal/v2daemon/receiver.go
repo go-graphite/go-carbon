@@ -56,8 +56,8 @@ func (e *FutureTimestampError) Error() string {
 	return fmt.Sprintf("timestamp %d is beyond the future limit (admission clock %d)", e.Timestamp, e.Clock)
 }
 
-// applicationOwner maps a name to its local ID (the identity's row slot in a
-// dictionary store, else its producer catalog ID) with one namefp.Table probe
+// applicationOwner maps a name to its local ID (its producer catalog ID, or
+// in a dictionary store its producer bind order) with one namefp.Table probe
 // keyed by the name's 96-bit fingerprint. No name bytes are read or kept. A
 // miss checks the store dictionary (or the producer catalog) first; only a
 // name absent there resolves its admission policy and registers a new identity.
@@ -92,7 +92,7 @@ func (o *applicationOwner) register(name string, fp namefp.Fingerprint) (uint32,
 				return 0, err
 			}
 			if h != nil {
-				id = uint64(h.Slot())
+				id = o.p.bind(h)
 			}
 		}
 	} else if err := o.p.openCatalog(); err != nil {
