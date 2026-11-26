@@ -124,8 +124,8 @@ func TestCatalogFoldDictOnlyL0Kill(t *testing.T) {
 		t.Fatalf("L0 files after the kill: %v", l0s)
 	}
 	raw, err := os.ReadFile(l0s[0])
-	if err != nil || len(raw) < 6 || string(raw[:5]) != "V2L0\x02" {
-		t.Fatalf("L0 file is not version 2: %q %v", raw[:min(len(raw), 6)], err)
+	if err != nil || len(raw) < 6 || string(raw[:5]) != "V2L0\x03" {
+		t.Fatalf("L0 file is not version 3: %q %v", raw[:min(len(raw), 6)], err)
 	}
 
 	// The torn tail of the next run file: a kill during its write, before

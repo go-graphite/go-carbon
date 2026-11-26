@@ -5,13 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
-	"math/bits"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+
+	partsformat "github.com/go-graphite/go-carbon/internal/v2part"
 )
 
 // L0 run files hold an owner's published head between seals (Config.L0).
@@ -25,16 +26,42 @@ import (
 // So Config.L0Dir may put them on tmpfs, which keeps the same guarantee
 // without process or device writes.
 //
-// Version 2 files carry packed dictionary IDs: each application ID is
-// written rotated left by one bit, so bit 63 of a packed ID costs no extra
-// uvarint byte. Version 1 files (catalog NumericIDs) stay readable; the
-// daemon maps their IDs through the producer catalog while it loads them,
-// and core deletes them, like any L0 file, once a durable seal covers them.
-const l0Magic = "V2L0\x02"
+// Version 3 files carry packed dictionary IDs in a compact wire form
+// (l0WireID): 5 uvarint bytes per application for up to 2^15 names per
+// vshard in the first 8 groups, where the packed ID itself takes 8. Version 1
+// files (catalog NumericIDs) stay readable; the daemon maps their IDs through
+// the producer catalog while it loads them, and core deletes them, like any
+// L0 file, once a durable seal covers them.
+const l0Magic = "V2L0\x03"
 
 const l0MagicV1 = "V2L0\x01"
 
-func l0WireID(id uint64) uint64 { return bits.RotateLeft64(id, 1) }
+// l0WireID reorders an engine ID so its uvarint is short: a NumericID is
+// id<<1; a packed ID sets bit 0, puts the vshard in bits 1-12, then a group
+// below 8 in 3 bits (bit 13 clear) or any group in 15 bits (bit 13 set),
+// and its dense dictionary ID last, so the high bits stay zero.
+func l0WireID(id uint64) uint64 {
+	if !IsPackedID(id) {
+		return id << 1
+	}
+	g, v, d := UnpackID(id)
+	if g < 8 {
+		return 1 | uint64(v)<<1 | uint64(g)<<14 | uint64(d)<<17
+	}
+	return 1 | uint64(v)<<1 | 1<<13 | uint64(g)<<14 | uint64(d)<<29
+}
+
+// l0ID inverts l0WireID; ok is false for a value it never writes.
+func l0ID(w uint64) (uint64, bool) {
+	if w&1 == 0 {
+		return w >> 1, true
+	}
+	v := uint16(w>>1) & (partsformat.VirtualShards - 1)
+	if w>>13&1 == 0 {
+		return PackID(uint16(w>>14)&7, v, uint32(w>>17)), w < 1<<49
+	}
+	return PackID(uint16(w>>14)&(maxPackedGroups-1), v, uint32(w>>29)), w < 1<<61
+}
 
 var l0Table = crc32.MakeTable(crc32.Castagnoli)
 
@@ -164,7 +191,7 @@ func decodeL0(b []byte) ([]coreBatch, error) {
 	if len(b) < len(l0Magic)+4 || (string(b[:len(l0Magic)]) != l0Magic && string(b[:len(l0Magic)]) != l0MagicV1) {
 		return nil, errL0Corrupt
 	}
-	rotated := b[len(l0Magic)-1] == l0Magic[len(l0Magic)-1]
+	compact := b[len(l0Magic)-1] == l0Magic[len(l0Magic)-1]
 	body := b[:len(b)-4]
 	if crc32.Checksum(body, l0Table) != binary.LittleEndian.Uint32(b[len(b)-4:]) {
 		return nil, errL0Corrupt
@@ -197,8 +224,11 @@ func decodeL0(b []byte) ([]coreBatch, error) {
 	for i := range out {
 		b := &out[i]
 		b.ID, b.Order, b.Clock = uv(), uv(), sv()
-		if rotated {
-			b.ID = bits.RotateLeft64(b.ID, -1)
+		if compact {
+			var ok bool
+			if b.ID, ok = l0ID(b.ID); !ok {
+				bad = true
+			}
 		}
 		if n := uv(); !bad && n > 0 {
 			if n > uint64(len(r)) {
