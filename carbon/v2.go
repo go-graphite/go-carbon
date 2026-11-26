@@ -143,6 +143,7 @@ func (app *App) startV2() error {
 	if app.v2Now != nil {
 		hooks.Now = app.v2Now
 	}
+	hooks.Stage = app.v2Stage
 	if c.V2.IDKeys {
 		v2part.IDKeys.Store(true)
 		hooks.IDKeys = true
