@@ -19,6 +19,7 @@ import (
 // A find must fence even an already restored projection: otherwise it can
 // return while an owner is still unvalidated (or whose hydration will fail).
 // Removing the binding fence makes the paused-query assertion fail.
+// Exact renders validate requested immutable rows and need no writable inventory.
 func TestV2RestartHydrationFindRenderDifferential(t *testing.T) {
 	v2part.IDKeys.Store(true)
 	t.Cleanup(func() { v2part.IDKeys.Store(false) })
@@ -135,17 +136,35 @@ func TestV2RestartHydrationFindRenderDifferential(t *testing.T) {
 	findDone := make(chan *ExpandedGlobResponse, 1)
 	renderDone := make(chan error, 1)
 	go func() { findDone <- listener.expandV2Catalog(listener.v2Catalog.Load(), queries[2]) }()
-	go func() { _, err := reader.Fetch(ctx, names[0], int(now-120), int(now)); renderDone <- err }()
+	go func() {
+		s, err := reader.Fetch(ctx, names[0], int(now-120), int(now))
+		if err == nil {
+			bits := []uint64{uint64(s.FromTime()), uint64(s.UntilTime()), uint64(s.Step())}
+			for _, v := range s.Values() {
+				bits = append(bits, math.Float64bits(v))
+			}
+			if !reflect.DeepEqual(bits, want[fmt.Sprint(names[0], "/", 120)]) {
+				err = fmt.Errorf("render during recovery differs: %v", bits)
+			}
+		}
+		renderDone <- err
+	}()
 	select {
 	case <-entered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("hydration did not start")
 	}
 	select {
+	case err := <-renderDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("exact render waited for writable inventory recovery")
+	}
+	select {
 	case got := <-findDone:
 		t.Fatalf("unfenced find returned during hydration: %+v", got)
-	case err := <-renderDone:
-		t.Fatalf("unfenced render returned during hydration: %v", err)
 	case <-time.After(50 * time.Millisecond):
 	}
 	close(release)
@@ -156,9 +175,6 @@ func TestV2RestartHydrationFindRenderDifferential(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("find remained fenced")
-	}
-	if err = <-renderDone; err != nil {
-		t.Fatal(err)
 	}
 	for i, q := range queries {
 		got := listener.expandV2Catalog(listener.v2Catalog.Load(), q)

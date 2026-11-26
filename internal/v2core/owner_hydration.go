@@ -8,8 +8,9 @@ import (
 	"github.com/go-graphite/go-carbon/internal/v2part"
 )
 
-// ensureHydrated is the single gate for reads, publication, seals and background
-// maintenance. Recovery only reconstructs RAM; a kill can repeat it from parts.
+// ensureHydrated gates discovery, publication, seals and background maintenance.
+// Exact immutable reads validate their own rows. Recovery only reconstructs RAM;
+// a kill can repeat it from parts.
 func (o *coreOwner) ensureHydrated() error {
 	o.hydrateOnce.Do(func() {
 		if o.hydrate != nil {

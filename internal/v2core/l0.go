@@ -260,13 +260,6 @@ func (o *coreOwner) writeL0(v PendingView) (string, error) {
 		o.stage("l0-renamed")
 	}
 	o.l0Bytes.Add(uint64(len(o.l0Buf)))
-	// A seal can leave one small suffix between normal publications. Keep
-	// headroom for both recent sizes, then shrink after two smaller writes.
-	keep := max(64<<10, 2*max(len(o.l0Buf), o.l0LastBytes))
-	o.l0LastBytes = len(o.l0Buf)
-	if cap(o.l0Buf) > keep {
-		o.l0Buf = make([]byte, 0, keep)
-	}
 	return path, nil
 }
 
