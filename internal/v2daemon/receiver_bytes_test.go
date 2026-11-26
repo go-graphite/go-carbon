@@ -28,7 +28,7 @@ func TestApplicationOwnerByteNames(t *testing.T) {
 		t.Run(fmt.Sprint(quota), func(t *testing.T) {
 			s, resolve := openProbeStore(t)
 			p := s.Producers[0]
-			mirrorQueue(p)
+			queuedName := mirrorQueue(p)
 			resolves := map[string]int{}
 			var rejected []string
 			o := &applicationOwner{p: p, resolve: func(name string) ([]byte, error) { resolves[name]++; return resolve(name) }, reject: func(name string, err error) {
@@ -68,7 +68,7 @@ func TestApplicationOwnerByteNames(t *testing.T) {
 			}
 			want = append(want, "ok.b")
 			for i, name := range want {
-				if got := queuedName(p, i); got != name {
+				if got := queuedName(i); got != name {
 					t.Fatalf("point %d name=%q want=%q", i, got, name)
 				}
 			}

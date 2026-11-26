@@ -19,13 +19,17 @@ import (
 
 // openProbeStore opens a layer-3 store whose catalog binds names to the shared
 // policy identities, as the daemon does.
-// mirrorQueue makes p keep detached batches in its packets, as classic
-// mirroring does; queuedName names the i-th application of its last packet.
-func mirrorQueue(p *Producer) { p.mirror = func(int, []v2core.Batch) error { return nil } }
-func queuedName(p *Producer, i int) string {
-	b := p.packets[len(p.packets)-1].batches[i]
-	name, _ := p.catalog.Key((b.ID-1)/uint64(p.count) + 1)
-	return name
+// mirrorQueue captures names submitted to the classic mirror boundary.
+func mirrorQueue(p *Producer) func(int) string {
+	var names []string
+	p.mirror = func(_ int, batches []v2core.Batch) error {
+		for _, b := range batches {
+			name, _ := p.catalog.Key((b.ID-1)/uint64(p.count) + 1)
+			names = append(names, name)
+		}
+		return nil
+	}
+	return func(i int) string { return names[i] }
 }
 
 func openProbeStore(tb testing.TB) (*Store, PolicyResolver) {
@@ -88,7 +92,7 @@ func probePoints(n int) []points.Point {
 func TestApplicationOwnerProbeFingerprint(t *testing.T) {
 	s, resolve := openProbeStore(t)
 	p := s.Producers[0]
-	mirrorQueue(p)
+	queuedName := mirrorQueue(p)
 	o := &applicationOwner{p: p, resolve: resolve}
 	names := []string{"collide.a", "collide.b", "collide.b", "collide.a", "collide.c", "collide.a"}
 	hashes := make([]uint64, len(names))
@@ -102,7 +106,7 @@ func TestApplicationOwnerProbeFingerprint(t *testing.T) {
 		t.Fatalf("catalog names=%d table=%d, want 3", got, o.names.Len())
 	}
 	for i, name := range names {
-		if got := queuedName(p, i); got != name {
+		if got := queuedName(i); got != name {
 			t.Fatalf("point %d (%q) queued as %q", i, name, got)
 		}
 	}
@@ -175,7 +179,7 @@ func TestApplicationOwnerProbeGrowthAndSharing(t *testing.T) {
 // BenchmarkApplicationOwnerProbe measures the L3 receiver adapter: "new"
 // registers 1,024 new names per op and reports live heap per name; "known"
 // appends 1,024 points of registered names per op (the steady-state hot path).
-// Journal sync is outside the timer.
+// First-admission journal sync is measured; known-name grouped sync is outside the timer.
 func BenchmarkApplicationOwnerProbe(b *testing.B) {
 	const batch = 1024
 	data := probePoints(batch)
@@ -251,7 +255,7 @@ func BenchmarkApplicationOwnerProbe(b *testing.B) {
 func TestApplicationOwnerProbeRefusesOneAtATime(t *testing.T) {
 	s, resolve := openProbeStore(t)
 	p := s.Producers[0]
-	mirrorQueue(p)
+	queuedName := mirrorQueue(p)
 	var refused []string
 	o := &applicationOwner{p: p, resolve: resolve, reject: func(name string, err error) {
 		if !errors.Is(err, ErrNameTooLong) {
@@ -268,7 +272,7 @@ func TestApplicationOwnerProbeRefusesOneAtATime(t *testing.T) {
 		t.Fatalf("refused=%d catalog=%d table=%d, want 3, 2, 2", len(refused), p.catalog.Count(), o.names.Len())
 	}
 	for i, want := range []string{"ok.a", "ok.a", "ok.b"} {
-		if got := queuedName(p, i); got != want {
+		if got := queuedName(i); got != want {
 			t.Fatalf("appended point %d queued as %q, want %q", i, got, want)
 		}
 	}
