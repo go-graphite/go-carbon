@@ -166,6 +166,14 @@ func TestV2UnionExpiryDoesNotResurrectClassic(t *testing.T) {
 	if isolatedTestProcess(t) {
 		return
 	}
+	for _, early := range []bool{false, true} {
+		t.Run(fmt.Sprintf("revive-before-hydration=%v", early), func(t *testing.T) { testV2UnionExpiryReset(t, early) })
+	}
+}
+
+// testV2UnionExpiryReset revives an expired name in a later incarnation. With
+// early, the reviving point arrives while every owner's hydration is held.
+func testV2UnionExpiryReset(t *testing.T, early bool) {
 	root := t.TempDir()
 	setup := func() *App {
 		app := v2TestApp(t, root)
@@ -251,10 +259,26 @@ func TestV2UnionExpiryDoesNotResurrectClassic(t *testing.T) {
 	// Reset authority is durable even when expiry is disabled on restart.
 	// This also leaves the resumed incarnation a deterministic query window.
 	app.Config.Whisper.StoreExpiration = &Duration{}
+	release, entered := make(chan struct{}), make(chan struct{}, 1)
+	if early {
+		app.v2Stage = func(stage string) {
+			if stage == "owner-hydration" {
+				select {
+				case entered <- struct{}{}:
+				default:
+				}
+				<-release
+			}
+		}
+	} else {
+		close(release)
+	}
 	if err := app.Start(); err != nil {
 		t.Fatal(err)
 	}
-	checkExpired()
+	if !early {
+		checkExpired()
+	}
 	// A later incarnation retains the whole-name classic reset barrier.
 	conn, err = net.Dial("tcp", app.v2.server.Addr().String())
 	if err != nil {
@@ -264,6 +288,27 @@ func TestV2UnionExpiryDoesNotResurrectClassic(t *testing.T) {
 		t.Fatal(err)
 	}
 	conn.Close()
+	checkReset := func() {
+		t.Helper()
+		masked, err := app.v2.reader.Masked(t.Context(), "overlap")
+		if err != nil || !masked {
+			t.Fatalf("reset barrier lost: masked=%v err=%v", masked, err)
+		}
+		s, mask, err := app.v2.reader.FetchWithMask(t.Context(), "overlap", int(stamp-1), int(stamp+1))
+		if err == nil && (!mask || s == nil || len(s.Values()) != 2 || !math.IsNaN(s.Values()[0])) {
+			t.Fatalf("reset barrier lost: mask=%v series=%v", mask, s)
+		}
+	}
+	if early {
+		// The point is admitted while hydration is held: the barrier holds.
+		select {
+		case <-entered:
+		case <-time.After(10 * time.Second):
+			t.Fatal("owner hydration never started")
+		}
+		checkReset()
+		close(release)
+	}
 	deadline = time.Now().Add(10 * time.Second)
 	for {
 		s, mask, err := app.v2.reader.FetchWithMask(t.Context(), "overlap", int(stamp-1), int(stamp+1))
@@ -280,17 +325,34 @@ func TestV2UnionExpiryDoesNotResurrectClassic(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	b := v2HTTP(t, app, fmt.Sprintf("/render/?format=json&target=overlap&from=%d&until=%d", stamp-1, stamp+1))
-	var body struct {
-		Metrics []struct {
-			Values   []float64 `json:"values"`
-			IsAbsent []bool    `json:"isAbsent"`
-		} `json:"metrics"`
+	checkRender := func() {
+		t.Helper()
+		b := v2HTTP(t, app, fmt.Sprintf("/render/?format=json&target=overlap&from=%d&until=%d", stamp-1, stamp+1))
+		var body struct {
+			Metrics []struct {
+				Values   []float64 `json:"values"`
+				IsAbsent []bool    `json:"isAbsent"`
+			} `json:"metrics"`
+		}
+		if err := json.Unmarshal(b, &body); err != nil {
+			t.Fatal(err)
+		}
+		if len(body.Metrics) != 1 || len(body.Metrics[0].Values) != 2 || !body.Metrics[0].IsAbsent[0] || body.Metrics[0].IsAbsent[1] || body.Metrics[0].Values[1] != 17 {
+			t.Fatalf("classic resurrected after reset: %s", b)
+		}
 	}
-	if err := json.Unmarshal(b, &body); err != nil {
+	checkRender()
+	if !early {
+		return
+	}
+	// The revived incarnation keeps the barrier across another restart.
+	app.Stop()
+	app = nil
+	app = setup()
+	app.Config.Whisper.StoreExpiration = &Duration{}
+	if err := app.Start(); err != nil {
 		t.Fatal(err)
 	}
-	if len(body.Metrics) != 1 || len(body.Metrics[0].Values) != 2 || !body.Metrics[0].IsAbsent[0] || body.Metrics[0].IsAbsent[1] || body.Metrics[0].Values[1] != 17 {
-		t.Fatalf("classic resurrected after reset: %s", b)
-	}
+	checkReset()
+	checkRender()
 }

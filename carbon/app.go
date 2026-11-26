@@ -80,6 +80,8 @@ type App struct {
 	// v2Now replaces the v2 core's rollup clock (window closure, idle
 	// maintenance) in tests; nil uses wall time.
 	v2Now func() time.Time
+	// v2Stage observes v2 core stages in tests (e.g. holds owner hydration).
+	v2Stage func(string)
 	sync.RWMutex
 	ConfigFilename         string
 	Config                 *Config
