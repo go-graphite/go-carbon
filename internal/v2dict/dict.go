@@ -107,6 +107,7 @@ type Dict struct {
 	mergeWG sync.WaitGroup
 
 	pol policyTable // Entry.Policy -> immutable suffix (policy.go)
+	grp policyTable // packed-ID group index -> placement group label
 }
 
 // shard is one shard of the append level: the scopes whose vshard maps to
@@ -240,9 +241,13 @@ func Open(dir string, opt Options) (*Dict, error) {
 				_ = d.log.Close()
 			}
 			_ = d.pol.close()
+			_ = d.grp.close()
 		}
 	}()
-	if err := d.pol.open(dir); err != nil {
+	if err := d.pol.open(dir, policyFile); err != nil {
+		return nil, err
+	}
+	if err := d.grp.open(dir, groupFile); err != nil {
 		return nil, err
 	}
 	for i := range d.shards {
@@ -925,7 +930,7 @@ func (d *Dict) Close() error {
 	d.closed = true
 	d.log.Close()
 	d.mu.Unlock()
-	err = errors.Join(err, d.pol.close())
+	err = errors.Join(err, d.pol.close(), d.grp.close())
 	d.flushWG.Wait()
 	d.mergeWG.Wait()
 	return err

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
+	"github.com/go-graphite/go-carbon/internal/v2dict"
 	partsformat "github.com/go-graphite/go-carbon/internal/v2part"
 )
 
@@ -29,8 +30,25 @@ func TestPackedIDRoundTrip(t *testing.T) {
 	}
 }
 
-func TestPolicyCatalogPackedIdentities(t *testing.T) {
+// packedTestCatalog returns a catalog with a store dictionary at dir.
+func packedTestCatalog(t testing.TB, dir string) *PolicyCatalog {
+	t.Helper()
+	d, err := v2dict.Open(dir, v2dict.Options{NoMerge: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
 	c := &PolicyCatalog{}
+	c.dict.Store(d)
+	return c
+}
+
+func TestPolicyCatalogPackedIdentities(t *testing.T) {
+	if _, err := (&PolicyCatalog{}).GroupIndex("test"); err == nil {
+		t.Fatal("packed group index without a dictionary")
+	}
+	dir := t.TempDir()
+	c := packedTestCatalog(t, dir)
 	g, err := c.GroupIndex("test")
 	if err != nil {
 		t.Fatal(err)
@@ -39,6 +57,9 @@ func TestPolicyCatalogPackedIdentities(t *testing.T) {
 		t.Fatal("group index not stable")
 	}
 	other, _ := c.GroupIndex("other")
+	if g == 0 || other == g {
+		t.Fatalf("group indexes %d %d", g, other)
+	}
 	names := []string{"a.b.c", "a.b.d", "x.y", "deep.name.with.parts"}
 	ids := make([]uint64, len(names))
 	var wg sync.WaitGroup
@@ -96,6 +117,16 @@ func TestPolicyCatalogPackedIdentities(t *testing.T) {
 	if c.lookup(PackID(g, 1, 1<<20)) != nil || c.lookup(PackID(99, 1, 1)) != nil {
 		t.Fatal("lookup of an unknown packed ID returned an identity")
 	}
+	// Group indexes are durable: a later process of the store packs the
+	// same IDs, even when it meets the groups in another order.
+	c.partDict().Close()
+	again := packedTestCatalog(t, dir)
+	if o, _ := again.GroupIndex("other"); o != other {
+		t.Fatalf("reopened group index %d, want %d", o, other)
+	}
+	if label, ok := again.packedGroup(PackID(g, 0, 0)); !ok || label != "test" {
+		t.Fatalf("reopened label of %d: %q %v", g, label, ok)
+	}
 }
 
 // TestPackedPagesHeap reports the page heap of N identity slots under
@@ -111,7 +142,7 @@ func TestPackedPagesHeap(t *testing.T) {
 		runtime.GC()
 		var before, after runtime.MemStats
 		runtime.ReadMemStats(&before)
-		c := &PolicyCatalog{}
+		c := packedTestCatalog(t, t.TempDir())
 		fill(c)
 		runtime.GC()
 		runtime.ReadMemStats(&after)
@@ -137,7 +168,7 @@ func TestPackedPagesHeap(t *testing.T) {
 
 func BenchmarkPolicyCatalogLookup(b *testing.B) {
 	const n = 1 << 20
-	c := &PolicyCatalog{}
+	c := packedTestCatalog(b, b.TempDir())
 	g, _ := c.GroupIndex("test")
 	h := &PolicyIdentity{}
 	for id := uint64(1); id <= n; id++ {

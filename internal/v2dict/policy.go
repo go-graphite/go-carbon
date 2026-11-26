@@ -24,10 +24,14 @@ import (
 // an old dictionary simply has no file and reads every entry as policy 0.
 const policyFile = "policies"
 
+// groupFile holds placement group labels in the same record format.
+const groupFile = "groups"
+
 // MaxPolicies bounds the table: Entry.Policy is a uint16 and 0 is reserved.
 const MaxPolicies = math.MaxUint16
 
 type policyTable struct {
+	file string
 	mu   sync.Mutex // appends and the index map
 	f    *os.File
 	byID atomic.Pointer[[][]byte] // suffix of index i at [i-1]; copy on write
@@ -36,8 +40,9 @@ type policyTable struct {
 }
 
 // openPolicies loads dir's policy table, without a torn last record.
-func (t *policyTable) open(dir string) error {
-	path := filepath.Join(dir, policyFile)
+func (t *policyTable) open(dir, file string) error {
+	t.file = file
+	path := filepath.Join(dir, file)
 	data, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -79,8 +84,22 @@ func (t *policyTable) open(dir string) error {
 
 // InternPolicy returns the index of an immutable policy suffix, appending
 // and syncing it on first use. The index never changes or is reused.
-func (d *Dict) InternPolicy(suffix []byte) (uint16, error) {
-	t := &d.pol
+func (d *Dict) InternPolicy(suffix []byte) (uint16, error) { return d.internTable(&d.pol, suffix) }
+
+// InternGroup returns the durable index (from 1) of a placement group label,
+// recording it once like a policy suffix. Packed engine IDs carry it.
+func (d *Dict) InternGroup(group string) (uint16, error) {
+	return d.internTable(&d.grp, []byte(group))
+}
+
+// Group returns the label of group index i, lock-free.
+func (d *Dict) Group(i uint16) (string, bool) {
+	g, ok := d.grp.get(i)
+	return string(g), ok
+}
+
+// internTable appends key to t once, durably, and returns its index.
+func (d *Dict) internTable(t *policyTable, suffix []byte) (uint16, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if i, ok := t.ix[string(suffix)]; ok {
@@ -97,7 +116,7 @@ func (d *Dict) InternPolicy(suffix []byte) (uint16, error) {
 	}
 	byID := *t.byID.Load()
 	if len(byID) >= MaxPolicies || len(suffix)+2 > math.MaxUint32-8 {
-		return 0, fmt.Errorf("v2dict: policy table full or suffix too long (%d bytes)", len(suffix))
+		return 0, fmt.Errorf("v2dict: %s table full or key too long (%d bytes)", t.file, len(suffix))
 	}
 	i := uint16(len(byID) + 1)
 	rec := make([]byte, 8, 10+len(suffix))
@@ -114,7 +133,7 @@ func (d *Dict) InternPolicy(suffix []byte) (uint16, error) {
 		err = syncDir(d.dir)
 	}
 	if err != nil {
-		t.err = fmt.Errorf("v2dict: policy append: %w", err)
+		t.err = fmt.Errorf("v2dict: %s append: %w", t.file, err)
 		return 0, t.err
 	}
 	owned := slices.Clone(suffix)
@@ -127,8 +146,10 @@ func (d *Dict) InternPolicy(suffix []byte) (uint16, error) {
 // Policy returns the suffix of policy index i. It reports false for 0 (an
 // entry with no recorded policy) and for an index never interned. The bytes
 // are shared and must not be modified.
-func (d *Dict) Policy(i uint16) ([]byte, bool) {
-	byID := *d.pol.byID.Load()
+func (d *Dict) Policy(i uint16) ([]byte, bool) { return d.pol.get(i) }
+
+func (t *policyTable) get(i uint16) ([]byte, bool) {
+	byID := *t.byID.Load()
 	if i == 0 || int(i) > len(byID) {
 		return nil, false
 	}

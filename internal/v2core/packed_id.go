@@ -47,40 +47,49 @@ type policyGroupPages struct {
 	shards [partsformat.VirtualShards]atomic.Pointer[policyVDir]
 }
 
-// packedPages is the packed half of a PolicyCatalog: group labels get a
-// process-local index on first use. Durable formats never trust it: parts
-// derive identities from (group, vshard, key.Local), and L0 must carry its
-// own group labels.
+// packedPages is the packed half of a PolicyCatalog, indexed by the store
+// dictionary's durable group index (v2dict InternGroup, from 1), so a packed
+// ID means the same name in every process of the store.
 type packedPages struct {
-	mu     sync.Mutex // creation only
-	index  map[partsformat.Group]uint16
+	mu     sync.Mutex // growth only
 	groups atomic.Pointer[[]*policyGroupPages]
 }
 
-var errPackedGroups = errors.New("v2core: too many placement groups for packed IDs")
+var (
+	errPackedGroups = errors.New("v2core: too many placement groups for packed IDs")
+	errPackedDict   = errors.New("v2core: packed IDs need the store dictionary")
+)
 
-// GroupIndex returns the process-local packed index of group.
+// GroupIndex returns the store's durable packed index of group (from 1),
+// recording a new group in the dictionary once.
 func (c *PolicyCatalog) GroupIndex(group partsformat.Group) (uint16, error) {
+	d := c.partDict()
+	if d == nil {
+		return 0, errPackedDict
+	}
+	i, err := d.InternGroup(string(group))
+	if err != nil {
+		return 0, err
+	}
+	if i >= maxPackedGroups {
+		return 0, errPackedGroups
+	}
+	if groups := c.packed.groups.Load(); groups != nil && int(i) < len(*groups) && (*groups)[i] != nil {
+		return i, nil
+	}
 	p := &c.packed
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if i, ok := p.index[group]; ok {
-		return i, nil
-	}
 	var groups []*policyGroupPages
 	if g := p.groups.Load(); g != nil {
 		groups = *g
 	}
-	if len(groups) >= maxPackedGroups {
-		return 0, errPackedGroups
+	if int(i) >= len(groups) || groups[i] == nil {
+		next := make([]*policyGroupPages, max(len(groups), int(i)+1))
+		copy(next, groups)
+		next[i] = &policyGroupPages{group: group}
+		p.groups.Store(&next)
 	}
-	if p.index == nil {
-		p.index = make(map[partsformat.Group]uint16)
-	}
-	i := uint16(len(groups))
-	next := append(groups[:len(groups):len(groups)], &policyGroupPages{group: group})
-	p.groups.Store(&next)
-	p.index[group] = i
 	return i, nil
 }
 
@@ -93,6 +102,9 @@ func (c *PolicyCatalog) packedSlot(id uint64, create bool) *atomic.Pointer[Polic
 		return nil
 	}
 	gp := (*groups)[g]
+	if gp == nil {
+		return nil
+	}
 	page := d >> 8
 	if dir := gp.shards[v].Load(); dir != nil && int(page) < len(*dir) {
 		if p := (*dir)[page].Load(); p != nil {
@@ -132,8 +144,8 @@ func (c *PolicyCatalog) packedSlot(id uint64, create bool) *atomic.Pointer[Polic
 func (c *PolicyCatalog) packedGroup(id uint64) (partsformat.Group, bool) {
 	g, _, _ := UnpackID(id)
 	groups := c.packed.groups.Load()
-	if groups == nil || int(g) >= len(*groups) {
-		return "", false
+	if groups == nil || int(g) >= len(*groups) || (*groups)[g] == nil {
+		return c.dictGroup(g)
 	}
 	return (*groups)[g].group, true
 }
@@ -172,4 +184,15 @@ func (e *coreEngine) PackedID(group partsformat.Group, vshard uint16, id uint32)
 		return 0, err
 	}
 	return PackID(g, vshard, id), nil
+}
+
+// dictGroup resolves a group index this process has not used yet, such as
+// one an L0 file or a part of an earlier process carries.
+func (c *PolicyCatalog) dictGroup(g uint16) (partsformat.Group, bool) {
+	d := c.partDict()
+	if d == nil {
+		return "", false
+	}
+	group, ok := d.Group(g)
+	return partsformat.Group(group), ok
 }
