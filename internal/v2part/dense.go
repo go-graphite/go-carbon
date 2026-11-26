@@ -750,9 +750,13 @@ func HasOrderSummary(data []byte) bool {
 // Call before the first Set. Exceeding it aborts this proposal, never inputs.
 func (w *DenseWriter) LimitBytes(n uint64) { w.writer.out.limit = n }
 
-// SealCompression writes this part's blocks at the fast seal level. Use it
-// only for parts a background merge rewrites; call before the first Set.
-func (w *DenseWriter) SealCompression() { w.writer.sst.(*denseSSTWriter).level = denseSealLevel }
+// SealCompression writes this part's blocks at the fast seal level and the
+// small seal block size. Use it only for parts a background merge rewrites;
+// call before the first Set.
+func (w *DenseWriter) SealCompression() {
+	t := w.writer.sst.(*denseSSTWriter)
+	t.level, t.blockSize = denseSealLevel, denseSealBlockSize
+}
 
 // IDKeyed makes this an ID-keyed part (GCI2 keys, descriptor schema 3) whose
 // IDs resolve at name dictionary generation (nonzero). Input then takes ID
