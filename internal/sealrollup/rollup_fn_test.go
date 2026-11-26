@@ -3,6 +3,7 @@ package sealrollup
 import (
 	"cmp"
 	"fmt"
+	"maps"
 	"math"
 	"math/rand"
 	randv2 "math/rand/v2"
@@ -195,6 +196,9 @@ func (f *Versions) merge() (dropped, materialized int) {
 type fnMetric struct {
 	cfg   Config
 	seals [][]Batch // per seal, this metric's batches in increasing order
+	// mutate, when set, rewrites the current v2 path's image after every
+	// seal (mutation tests of the comparison rule only).
+	mutate func(closed map[key][2]uint64, lost map[key]bool)
 }
 
 type fnCorpus struct {
@@ -580,6 +584,52 @@ type fnStats struct {
 	firstVersionsLen   int
 	versionsWhisperOK  int // all-versions function vs eager Whisper
 	mergedWhisperOK    int // merged function vs eager Whisper
+	slots              int // compared slots, fine and coarse
+	ringLoss           int // compared slots (fine and coarse) where Whisper lost an older point to a future point
+	ringLossDiffers    int // of those, slots where the current v2 path differs from Whisper (allowed)
+	unexplained        int // current v2 path vs Whisper misses outside ring-loss slots (must be 0)
+}
+
+// ringLoss is one slot where eager Whisper lost an older point to a point
+// that was in the future when written (Time > its batch Now): Whisper archives
+// are rings, so the future point takes the physical slot of a point one ring
+// earlier that is still inside retention. v2's contract keeps the older point (no ring), so the slot,
+// and each coarser window built over the older point, may differ from Whisper
+// while the slot still holds the ring winner (holds) and the older point is
+// still inside its archive's retention (span) at the current admission clock;
+// every other slot must stay equal.
+type ringLoss struct{ older, holds, span int64 }
+
+// futureRingLoss records the seal's ring losses; before is the eager image
+// before the seal, after the image once it is installed.
+func futureRingLoss(c Config, seal []Batch, before, after map[key]Sample, lost map[key]ringLoss) {
+	for _, b := range seal {
+		for _, p := range b.Points {
+			if p.Time <= b.Now {
+				continue
+			}
+			for a, arch := range c.Archives {
+				k := key{a, slot(p.Time, arch)}
+				old, had := before[k]
+				w := align(p.Time, arch.Step)
+				if !had || old.Time == w || after[k].Time != w || old.Time <= b.Now-arch.Step*arch.Count {
+					continue // ordinary ring reuse: the older point had left retention
+				}
+				lost[k] = ringLoss{old.Time, w, arch.Step * arch.Count}
+				for up := a + 1; up < len(c.Archives); up++ {
+					u := c.Archives[up]
+					lost[key{up, slot(old.Time, u)}] = ringLoss{old.Time, align(old.Time, u.Step), arch.Step * arch.Count}
+				}
+			}
+		}
+	}
+}
+
+// inRingLoss reports whether slot k of the Whisper image is a live ring loss
+// at admission clock now.
+func inRingLoss(lost map[key]ringLoss, whisper map[key][2]uint64, k key, now int64) bool {
+	l, ok := lost[k]
+	return ok && int64(whisper[k][0]) == l.holds && l.older > now-l.span
 }
 
 func logical(img map[key]Sample) map[key][2]uint64 {
@@ -655,6 +705,8 @@ func runFnMetric(t *testing.T, m fnMetric, mergeRng *randv2.Rand, st *fnStats) {
 	var through int64
 	var store, routed []Version
 	merged := &Versions{c: c}
+	lost := map[key]ringLoss{}
+	var clock int64 // greatest admission clock so far
 	for si, seal := range m.seals {
 		if len(seal) == 0 {
 			continue
@@ -667,8 +719,13 @@ func runFnMetric(t *testing.T, m fnMetric, mergeRng *randv2.Rand, st *fnStats) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		before := maps.Clone(eager)
 		for _, r := range want.Records {
 			install(eager, []Delta{r.Delta})
+		}
+		futureRingLoss(c, seal, before, eager, lost)
+		for _, b := range seal {
+			clock = max(clock, b.Now)
 		}
 		// The engine resolves a physical slot by the greatest record order across
 		// parts (later part on ties), not by install sequence.
@@ -684,6 +741,15 @@ func runFnMetric(t *testing.T, m fnMetric, mergeRng *randv2.Rand, st *fnStats) {
 		routed = append(routed, recordVersions(c, got.Records)...)
 		closed := logical(NewVersions(c, routed).image())
 		whisperImg := logical(eager)
+		live := map[key]bool{}
+		for k := range lost {
+			if inRingLoss(lost, whisperImg, k, clock) {
+				live[k] = true
+			}
+		}
+		if m.mutate != nil {
+			m.mutate(closed, live)
+		}
 
 		part := rawPart(c, seal)
 		store = append(store, part...)
@@ -710,14 +776,23 @@ func runFnMetric(t *testing.T, m fnMetric, mergeRng *randv2.Rand, st *fnStats) {
 		}
 		st.compares++
 		for k := range keys {
+			st.slots++
+			if live[k] {
+				st.ringLoss++
+				if !sameSlot(whisperImg, closed, k) {
+					st.ringLossDiffers++
+				}
+			} else if !sameSlot(whisperImg, closed, k) {
+				st.unexplained++
+			}
 			if k.archive == 0 {
-				if !sameSlot(whisperImg, closed, k) || !sameSlot(closed, current, k) || !sameSlot(closed, versions, k) || !sameSlot(closed, mergedImg, k) {
+				if !live[k] && !sameSlot(whisperImg, closed, k) || !sameSlot(closed, current, k) || !sameSlot(closed, versions, k) || !sameSlot(closed, mergedImg, k) {
 					t.Fatalf("seal %d: fine slot %v differs", si, k)
 				}
 				continue
 			}
 			st.coarse++
-			if sameSlot(whisperImg, closed, k) {
+			if live[k] || sameSlot(whisperImg, closed, k) {
 				st.closedOK++
 			} else if st.firstClosedMiss == "" {
 				st.firstClosedMiss = fmt.Sprintf("%s m%d xff%g seal%d a%d slot%d whisper%v closed%v history %+v", ladderString(c), c.Method, c.XFilesFactor, si, k.archive, k.slot, whisperImg[k], closed[k], m.seals[:si+1])
@@ -790,6 +865,7 @@ func runFnCorpus(t *testing.T, corpus fnCorpus) fnStats {
 	}
 	t.Logf("RESULT corpus=%s metrics=%d comparisons=%d coarse_slots=%d closed_vs_whisper=%s current_records=%s all_versions=%s merged_materialized=%s versions_vs_whisper=%s merged_vs_whisper=%s merges=%d dropped=%d materialized=%d window_evals=%d older_event_evals=%d",
 		corpus.name, len(corpus.metrics), st.compares, st.coarse, pct(st.closedOK, st.coarse), pct(st.currentOK, st.coarse), pct(st.versionsOK, st.coarse), pct(st.mergedOK, st.coarse), pct(st.versionsWhisperOK, st.coarse), pct(st.mergedWhisperOK, st.coarse), st.merges, st.drops, st.mat, st.walks, st.deepWalks)
+	t.Logf("RESULT corpus=%s future_ring_loss_slots=%d (%s of compared) where_v2_differs=%d unexplained_v2_vs_whisper=%d", corpus.name, st.ringLoss, pct(st.ringLoss, st.slots), st.ringLossDiffers, st.unexplained)
 	if st.firstVersionsMiss != "" {
 		t.Logf("RESULT corpus=%s shortest versions-vs-whisper miss: %.4000s", corpus.name, st.firstVersionsMiss)
 	}
@@ -814,7 +890,7 @@ func TestRollupAsFunctionCorpora(t *testing.T) {
 		corpus := gen()
 		t.Run(corpus.name, func(t *testing.T) {
 			t.Parallel()
-			if st := runFnCorpus(t, corpus); st.closedOK != st.coarse || st.versionsWhisperOK != st.coarse || st.mergedWhisperOK != st.coarse {
+			if st := runFnCorpus(t, corpus); st.unexplained != 0 || st.closedOK != st.coarse || st.versionsWhisperOK != st.coarse || st.mergedWhisperOK != st.coarse {
 				t.Errorf("%s: current v2 path differs from eager Whisper; first: %.2000s", corpus.name, st.firstClosedMiss)
 			}
 		})
@@ -834,6 +910,50 @@ func TestRollupAsFunctionProperty(t *testing.T) {
 			runFnCorpus(t, corpus)
 		})
 	}
+}
+
+// TestFutureRingLossRule checks the oracle's future-point rule with mutations
+// of the current v2 path's image: changing every coarse ring-loss slot (v2
+// keeping the older point instead of Whisper's ring winner) is allowed, while
+// changing one coarse slot outside them is an unexplained difference.
+func TestFutureRingLossRule(t *testing.T) {
+	corpus := fnRandom(8, 60) // seeds 3 and 7 each keep one older closed miss outside ring loss
+	run := func(mutate func(map[key][2]uint64, map[key]bool)) fnStats {
+		st := fnStats{classes: map[string]int{}, examples: map[string]string{}}
+		rng := randv2.New(randv2.NewPCG(1, 2))
+		for _, m := range corpus.metrics {
+			m.mutate = mutate
+			runFnMetric(t, m, rng, &st)
+		}
+		return st
+	}
+	base := run(nil)
+	if base.ringLoss == 0 || base.unexplained != 0 {
+		t.Fatalf("baseline: ring-loss slots %d unexplained %d, want some and 0", base.ringLoss, base.unexplained)
+	}
+	kept := run(func(closed map[key][2]uint64, lost map[key]bool) {
+		for k := range lost {
+			if k.archive > 0 {
+				closed[k] = [2]uint64{closed[k][0], closed[k][1] ^ 1}
+			}
+		}
+	})
+	if kept.ringLossDiffers == 0 || kept.unexplained != 0 {
+		t.Fatalf("ring-loss slots changed: differs %d unexplained %d, want some and 0", kept.ringLossDiffers, kept.unexplained)
+	}
+	once := false
+	other := run(func(closed map[key][2]uint64, lost map[key]bool) {
+		for k, v := range closed {
+			if !once && k.archive > 0 && !lost[k] {
+				closed[k], once = [2]uint64{v[0], v[1] ^ 1}, true
+			}
+		}
+	})
+	if other.unexplained == 0 {
+		t.Fatal("a changed slot outside ring loss went unnoticed")
+	}
+	t.Logf("RESULT ring-loss rule: baseline ring_loss=%d of %d slots (%s) where_v2_differs=%d; mutation kept-older differs=%d unexplained=%d; mutation other-slot unexplained=%d",
+		base.ringLoss, base.slots, pct(base.ringLoss, base.slots), base.ringLossDiffers, kept.ringLossDiffers, kept.unexplained, other.unexplained)
 }
 
 // fnImages runs one metric and calls check after every seal with the eager

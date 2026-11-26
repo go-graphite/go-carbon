@@ -48,6 +48,9 @@ type Config struct {
 	// to outlive a kill -9, not a reboot (a clean stop seals them). Empty keeps
 	// them under root. Open claims it for root (claimL0Dir).
 	L0Dir string
+	// FutureLimit refuses TCP points stamped more than this after their
+	// batch's admission clock, before they reach L0. Zero keeps every point.
+	FutureLimit time.Duration
 }
 
 // Store owns core and its serial producers. Stop all producers before Close.
