@@ -1,12 +1,18 @@
 package v2core
 
 import (
+	"errors"
 	"fmt"
+	"math"
 	"os"
+	"reflect"
 	"runtime"
+	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/go-graphite/go-carbon/internal/sealrollup"
 	"github.com/go-graphite/go-carbon/internal/v2dict"
@@ -106,13 +112,17 @@ func TestPolicyCatalogPackedIdentities(t *testing.T) {
 			t.Fatalf("dict ID %d: page slot aliased (%v)", d, h)
 		}
 	}
-	// A NumericID and the packed space never share slots.
+	// A store with a dictionary refuses NumericIDs, so the dense directory
+	// holds only packed identities' row slots: each maps back to its handle.
 	_, raw := rollupTestPolicy(t, "numeric.name", "1s:1d", sealrollup.Last, .5)
-	if _, err := c.intern(7, "numeric.name", raw); err != nil {
-		t.Fatal(err)
+	if _, err := c.intern(7, "numeric.name", raw); !errors.Is(err, errNumericWithDict) {
+		t.Fatalf("NumericID with a dictionary: %v, want refusal", err)
 	}
-	if c.lookup(7).Name() != "numeric.name" || c.lookup(PackID(g, 0, 7)) != nil && c.lookup(PackID(g, 0, 7)).Name() == "numeric.name" {
-		t.Fatal("packed and numeric spaces overlap")
+	for _, d := range []uint32{0, 255, 256, 511, 512, 70000} {
+		h := c.lookup(PackID(g, want, d))
+		if r := h.rowID(); r == 0 || r > math.MaxUint32 || c.rowLookup(r) != h || c.lookup(r) != nil || durableID(r, c.rowLookup) != h.id {
+			t.Fatalf("dict ID %d: row slot %d does not map back", d, r)
+		}
 	}
 	if c.lookup(PackID(g, 1, 1<<20)) != nil || c.lookup(PackID(99, 1, 1)) != nil {
 		t.Fatal("lookup of an unknown packed ID returned an identity")
@@ -192,4 +202,97 @@ func BenchmarkPolicyCatalogLookup(b *testing.B) {
 			}
 		}
 	})
+}
+
+// TestPackedNameLifecycle seals packed names through expiry, revival and a
+// restart. A name written in the expiring seal stays live (the expiry pass
+// matches the owner's durable ID against row slots), the idle name expires,
+// the revived name seals under the packed ID its writer admitted, and the
+// reopened store finds the same names and renders the same records.
+func TestPackedNameLifecycle(t *testing.T) {
+	saved := partsformat.IDKeys.Swap(true)
+	defer partsformat.IDKeys.Store(saved)
+	root := t.TempDir()
+	var clock atomic.Int64
+	var expireOn atomic.Bool
+	clock.Store(2000)
+	hooks := Hooks{
+		IDKeys:    true,
+		Now:       func() time.Time { return time.Unix(clock.Load(), 0) },
+		Expire:    func(RollupPolicy, RollupMetadata, time.Time) bool { return expireOn.Load() },
+		ExpiryTTL: func(RollupPolicy, time.Time) (time.Duration, time.Time) { return time.Second, time.Time{} },
+	}
+	open := func() *Engine {
+		e, err := Open(root, adoptConfig(), hooks)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return e
+	}
+	write := func(e *Engine, order uint64, names ...string) map[string]uint64 {
+		ids := map[string]uint64{}
+		var batches []Batch
+		for i, name := range names {
+			_, raw := rollupTestPolicy(t, name, "1s:120,10s:1h", sealrollup.Last, .5)
+			id := writerID(t, e.identities, 0, raw)
+			if !IsPackedID(id) {
+				t.Fatalf("%s admitted under %#x, not a packed ID", name, id)
+			}
+			ids[name] = id
+			row := Row{ID: id, Time: 1000 + int64(order), Bits: math.Float64bits(float64(order*10) + float64(i)), Seq: order*8 + uint64(i)}
+			batches = append(batches, Batch{ID: id, Order: order*8 + uint64(i), Clock: 1010, Policy: raw, Points: []Row{row}})
+		}
+		if err := e.AppendBatches(0, batches, order*8+uint64(len(names)), true); err != nil {
+			t.Fatal(err)
+		}
+		return ids
+	}
+	type state struct {
+		meta    RollupMetadata
+		records []sealrollup.Record
+	}
+	read := func(e *Engine) map[string]state {
+		snapshot := e.DBs()[0].NewSnapshot()
+		defer snapshot.Close()
+		out := map[string]state{}
+		if err := scanRollups(snapshot, e.identities, func(p RollupPolicy, m RollupMetadata, r []sealrollup.Record) error {
+			out[string(p.Name)] = state{m, slices.Clone(r)}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	e := open()
+	ids := write(e, 1, "life.idle", "life.busy")
+	clock.Store(2010)
+	expireOn.Store(true)
+	if got := write(e, 2, "life.busy"); got["life.busy"] != ids["life.busy"] {
+		t.Fatalf("life.busy re-admitted under %#x, want %#x", got["life.busy"], ids["life.busy"])
+	}
+	s := read(e)
+	if busy, ok := s["life.busy"]; !ok || busy.meta.Expired || busy.meta.ID != ids["life.busy"] {
+		t.Fatalf("written name expired or lost its ID: ok=%v %+v", ok, busy.meta)
+	}
+	if idle, ok := s["life.idle"]; ok && !idle.meta.Expired {
+		t.Fatalf("idle name did not expire: %+v", idle.meta)
+	}
+	expireOn.Store(false)
+	clock.Store(2020)
+	revived := write(e, 3, "life.idle")
+	s = read(e)
+	if idle, ok := s["life.idle"]; !ok || idle.meta.Expired || idle.meta.ID != revived["life.idle"] {
+		t.Fatalf("revived name: ok=%v %+v, want ID %#x", ok, idle.meta, revived["life.idle"])
+	}
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+	e = open()
+	defer e.Close()
+	if after := read(e); !reflect.DeepEqual(after, s) {
+		t.Fatalf("restart changed names or records:\nbefore %+v\nafter  %+v", s, after)
+	}
+	if got := write(e, 4, "life.idle", "life.busy"); got["life.idle"] != revived["life.idle"] || got["life.busy"] != ids["life.busy"] {
+		t.Fatalf("restart re-admitted %v, want idle %#x busy %#x", got, revived["life.idle"], ids["life.busy"])
+	}
 }

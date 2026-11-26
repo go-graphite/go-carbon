@@ -227,7 +227,19 @@ func TestIDKeyedSealDifferential(t *testing.T) {
 					}
 					cursor := uint64((epoch + 1) * names)
 					for _, e := range engines {
-						if err := e.submitBatches(0, batches, cursor, true); err != nil {
+						// Each store submits its own engine IDs: packed with a dictionary.
+						eb := make([]coreBatch, len(batches))
+						for bi, b := range batches {
+							id := writerID(t, e.identities, b.ID, b.Policy)
+							pts := make([]row, len(b.Points))
+							for pi, p := range b.Points {
+								p.ID = id
+								pts[pi] = p
+							}
+							b.ID, b.Points = id, pts
+							eb[bi] = b
+						}
+						if err := e.submitBatches(0, eb, cursor, true); err != nil {
 							t.Fatal(err)
 						}
 					}

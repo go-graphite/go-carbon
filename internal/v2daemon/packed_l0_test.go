@@ -50,16 +50,9 @@ func TestL0ProducerFromPackedName(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Dictionary only: no identity is registered under the packed ID.
-		if e.ApplicationPolicy(id) != nil {
-			t.Fatal("packed identity registered before the switch")
-		}
-		if got, err := l0Producer(e, id, producers); err != nil || got != owner {
-			t.Fatalf("%s: dictionary-only producer %d %v, want %d", name, got, err, owner)
-		}
-		// Registered under the packed ID.
-		if _, err := e.RegisterApplicationPolicy(id, name, admitPolicy(t, name)); err != nil {
-			t.Fatal(err)
+		// Admission registers the identity under its packed ID.
+		if h := e.ApplicationPolicy(id); h == nil || h.ID() != id {
+			t.Fatalf("%s: admission did not register packed ID %d", name, id)
 		}
 		if got, err := l0Producer(e, id, producers); err != nil || got != owner {
 			t.Fatalf("%s: registered producer %d %v, want %d", name, got, err, owner)

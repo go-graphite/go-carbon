@@ -308,7 +308,7 @@ func TestRegisteredApplicationReusesIdentity(t *testing.T) {
 			if got != name || unsafe.StringData(got) != unsafe.StringData(owned) {
 				t.Fatalf("layer %d: name()=%q, want the catalog's own %q", p.layer, got, name)
 			}
-			if r != p.engine.ApplicationPolicy(NumericID(id, p.index, p.count)) {
+			if r != p.applications[id] {
 				t.Fatal("registration allocated a separate identity")
 			}
 		}

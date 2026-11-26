@@ -79,8 +79,7 @@ type Producer struct {
 	catalog                         *partlog.NameCatalog
 	packets                         []packet
 	outboxes                        []*v2core.Outbox            // free; one in steady intake
-	applications                    []*v2core.ApplicationPolicy // by catalog ID
-	admit                           []*v2core.ApplicationPolicy // queued names without a dictionary ID
+	applications                    []*v2core.ApplicationPolicy // by catalog ID, bound by catalogPolicies
 	cursor                          uint64
 	applyOrder                      uint64
 	journalDir                      string
@@ -216,7 +215,10 @@ func openWithRecoveryWorkers(root string, c Config, hooks v2core.Hooks, workers 
 			if b.Order <= frontiers[owner][producer] {
 				return false, nil
 			}
-			return true, p.openCatalog()
+			if err := p.openCatalog(); err != nil {
+				return false, err
+			}
+			return true, p.upgradeL0Batch(b)
 		})
 		if err != nil {
 			_ = s.Close()
@@ -237,7 +239,7 @@ func (p *Producer) openCatalog() error {
 	var err error
 	if p.layer == 3 {
 		recovery := p.engine.NewPolicyRecovery()
-		binding := &catalogPolicies{engine: p.engine, producer: p.index, producers: p.count, recovery: recovery}
+		binding := &catalogPolicies{p: p, recovery: recovery}
 		p.catalog, err = partlog.OpenNameCatalog(filepath.Join(p.journalDir, "catalog"), binding)
 		if err == nil {
 			err = recovery.Finish()
@@ -276,6 +278,26 @@ func l0Producer(e *v2core.Engine, id uint64, producers int) (int, error) {
 		return 0, fmt.Errorf("L0 application %#x has no dictionary name", id)
 	}
 	return v2recv.OwnerFor(name, producers), nil
+}
+
+// upgradeL0Batch maps a version-1 L0 batch's catalog NumericID to the
+// identity the catalog binding admitted for that local ID (its packed
+// dictionary ID once the store has a dictionary). The file stays until a
+// durable seal covers it, so a kill before then maps it again.
+func (p *Producer) upgradeL0Batch(b *v2core.Batch) error {
+	if v2core.IsPackedID(b.ID) {
+		return nil
+	}
+	local := (b.ID-1)/uint64(p.count) + 1
+	if local >= uint64(len(p.applications)) || p.applications[local] == nil {
+		return fmt.Errorf("L0 application %d has no catalog entry", b.ID)
+	}
+	id := p.applications[local].ID()
+	for i := range b.Points {
+		b.Points[i].ID = id + (b.Points[i].ID - b.ID)
+	}
+	b.ID = id
+	return nil
 }
 
 // NumericID is an injective mapping of persisted stream-local IDs. It is not a hash.
@@ -367,13 +389,10 @@ func (p *Producer) Drain() error {
 			return p.fail(err)
 		}
 	}
-	// New names get their dictionary IDs here, durable before core sees
-	// their points: one batch of appends and at most one fsync per drain.
-	if len(p.admit) > 0 {
-		err := p.engine.AdmitNames(p.admit)
-		clear(p.admit)
-		p.admit = p.admit[:0]
-		if err != nil {
+	// New names got their packed dictionary IDs at admission; they are
+	// durable before core sees their points: at most one fsync per drain.
+	if d := p.engine.Dictionary(); d != nil {
+		if err := d.Sync(); err != nil {
 			return p.fail(err)
 		}
 	}

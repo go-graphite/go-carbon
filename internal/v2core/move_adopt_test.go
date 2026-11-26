@@ -52,10 +52,11 @@ func adoptDonor(t *testing.T, policy []byte, samples ...sealrollup.Sample) MoveP
 func adoptLive(t *testing.T, e *Engine, policy []byte, order, cursor uint64, samples ...sealrollup.Sample) {
 	t.Helper()
 	var rows []Row
+	id := writerID(t, e.identities, 7, policy)
 	for i, s := range samples {
-		rows = append(rows, Row{ID: 7, Time: s.Time, Bits: s.Bits, Seq: uint64(i + 1)})
+		rows = append(rows, Row{ID: id, Time: s.Time, Bits: s.Bits, Seq: uint64(i + 1)})
 	}
-	if err := e.AppendBatches(0, []Batch{{ID: 7, Order: order, Clock: 1010, Policy: policy, Points: rows}}, cursor, true); err != nil {
+	if err := e.AppendBatches(0, []Batch{{ID: id, Order: order, Clock: 1010, Policy: policy, Points: rows}}, cursor, true); err != nil {
 		t.Fatal(err)
 	}
 }

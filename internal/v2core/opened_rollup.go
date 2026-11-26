@@ -315,20 +315,35 @@ func (s *OpenedRollupParts) SnapshotForNames(ctx context.Context, snapshot *pebb
 
 // readIdentity reuses a slim row's validated dictionary identity and digest.
 // Full definitions and the first encounter still pass the canonical byte oracle.
+// With a store dictionary the row's identity is its packed dictionary ID,
+// whatever meta.ID an older part carries: ID-keyed rows derive it from the
+// key, name-keyed rows map the name through the dictionary.
 func (c *PolicyCatalog) readIdentity(meta RollupMetadata, slim bool, key v2part.Key, definition *[]byte) (*PolicyIdentity, error) {
-	h := c.lookup(meta.ID)
+	id, err := c.keyEngineID(meta.ID, key)
+	if err != nil {
+		return nil, err
+	}
+	// An ID-keyed part sealed with a dictionary carries its key's packed ID;
+	// only a legacy part carries a NumericID, which keyEngineID replaces.
+	if key.ByID && IsPackedID(meta.ID) && meta.ID != id {
+		return nil, errors.New("inconsistent rollup dictionary identity")
+	}
+	h := c.lookup(id)
 	known := key.ByID && h != nil && h.dictID.Load() != 0
 	if known && (h.policy.Group != key.Group || h.vshard != key.VShard || h.dictID.Load() != key.Local+1) {
 		return nil, errors.New("inconsistent rollup dictionary identity")
 	}
-	var err error
+	var named uint32
 	if !slim || !known {
 		if slim {
 			*definition, err = appendRollupDefinition((*definition)[:0], key.Metric, key.Group, meta.Frontier.Policy)
 			meta.Policy = *definition
 		}
+		if err == nil && !key.ByID {
+			id, named, err = c.nameEngineID(id, key, meta.Policy)
+		}
 		if err == nil {
-			h, err = c.intern(meta.ID, string(key.Metric), meta.Policy)
+			h, err = c.intern(id, string(key.Metric), meta.Policy)
 		}
 	}
 	if err == nil {
@@ -339,8 +354,52 @@ func (c *PolicyCatalog) readIdentity(meta RollupMetadata, slim bool, key v2part.
 	}
 	if key.ByID && !known {
 		h.rememberDictID(key.Local)
+	} else if named != 0 {
+		h.rememberDictID(named - 1)
 	}
 	return h, nil
+}
+
+// keyEngineID is the packed ID of an ID-keyed row once the store has a
+// dictionary; any other row keeps id until nameEngineID maps it.
+func (c *PolicyCatalog) keyEngineID(id uint64, key v2part.Key) (uint64, error) {
+	if !key.ByID || c.partDict() == nil {
+		return id, nil
+	}
+	gi, err := c.GroupIndex(key.Group)
+	if err != nil {
+		return 0, err
+	}
+	return PackID(gi, key.VShard, key.Local), nil
+}
+
+// nameEngineID maps a name-keyed row to its packed dictionary ID, appending
+// the name as a seal would (the seal syncs before any part carries it). It
+// returns the dictionary ID plus one, 0 without a dictionary.
+func (c *PolicyCatalog) nameEngineID(id uint64, key v2part.Key, definition []byte) (uint64, uint32, error) {
+	d := c.partDict()
+	if d == nil {
+		return id, 0, nil
+	}
+	gi, err := c.GroupIndex(key.Group)
+	if err != nil {
+		return 0, 0, err
+	}
+	ent, ok := d.Lookup(string(key.Group), key.VShard, []byte(key.Metric))
+	if !ok || ent.Deleted() {
+		_, suffix, err := c.admissionGroup(definition)
+		if err != nil {
+			return 0, 0, err
+		}
+		policy, err := d.InternPolicy(suffix)
+		if err != nil {
+			return 0, 0, err
+		}
+		if ent, _, err = d.Append(string(key.Group), key.VShard, []byte(key.Metric), policy); err != nil {
+			return 0, 0, err
+		}
+	}
+	return PackID(gi, key.VShard, ent.ID), ent.ID + 1, nil
 }
 
 func validateReadMetadata(h *PolicyIdentity, meta RollupMetadata, key v2part.Key) error {

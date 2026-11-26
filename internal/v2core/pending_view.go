@@ -148,7 +148,8 @@ func (v PendingView) Ref(pos int) (id uint64, registered *ApplicationPolicy, pol
 	row := s.firstRow() + uint32(pos-s.start)
 	pk := &s.packets[s.packetAt(row)]
 	id, _ = s.idTime(pk, row)
-	return id, v.lookup(id), nil
+	h := v.lookup(id)
+	return durableID(id, v.lookup), h, nil
 }
 
 // Application decodes the application holding pos and returns the position
@@ -178,6 +179,7 @@ func (s *pendingSegment) decode(pk *pendingPacket, lo, hi uint32, lookup func(ui
 	points := make([]row, hi-lo)
 	for k := lo; k < hi; k++ {
 		id, t := s.idTime(pk, k)
+		id = durableID(id, lookup)
 		seq := order
 		if pk.Flags&pendingSeq != 0 {
 			seq = s.seqs[pk.Seqs+k-pk.FirstRow]
@@ -214,7 +216,7 @@ func (v PendingView) Each(fn func(*PendingApplication) bool) {
 					hi++
 				}
 				id, _ := s.idTime(pk, lo)
-				a = PendingApplication{ID: id, Order: pk.FirstOrder + uint64(d), Clock: pk.Clock, Points: int(hi - lo), lookup: v.lookup}
+				a = PendingApplication{ID: durableID(id, v.lookup), Order: pk.FirstOrder + uint64(d), Clock: pk.Clock, Points: int(hi - lo), lookup: v.lookup}
 				if !fn(&a) {
 					return
 				}
@@ -542,6 +544,13 @@ func mergeRuns(a, b *pendingRun) pendingRun {
 func (v PendingView) Find(ids []uint64, cold func(*Batch) (bool, error)) ([]int, error) {
 	var out []int
 	for _, id := range ids {
+		// Runs index head row IDs: a packed identity's slot. A NumericID
+		// is its own row ID, so its query never reads the catalog.
+		if IsPackedID(id) && v.lookup != nil {
+			if h := v.lookup(id); h != nil && h.slot != 0 {
+				id = uint64(h.slot)
+			}
+		}
 		for ri := range v.runs {
 			r := &v.runs[ri]
 			k, _ := slices.BinarySearch(r.keys, id<<32)

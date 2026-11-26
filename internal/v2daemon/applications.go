@@ -47,21 +47,13 @@ func (p *Producer) RegisterApplication(name string, policy []byte) (*v2core.Appl
 	return p.application(id)
 }
 
-// application reuses the handle the catalog binding has already validated and
-// installed in this engine epoch, including during recovery.
+// application returns the handle the catalog binding installed in this
+// engine epoch, including during recovery.
 func (p *Producer) application(id uint64) (*v2core.ApplicationPolicy, uint64, error) {
 	if id < uint64(len(p.applications)) && p.applications[id] != nil {
 		return p.applications[id], id, nil
 	}
-	registered := p.engine.ApplicationPolicy(NumericID(id, p.index, p.count))
-	if registered == nil {
-		return nil, 0, errors.New("application catalog has no bound policy")
-	}
-	for uint64(len(p.applications)) <= id {
-		p.applications = append(p.applications, nil) // catalog IDs are dense
-	}
-	p.applications[id] = registered
-	return registered, id, nil
+	return nil, 0, errors.New("application catalog has no bound policy")
 }
 
 // AppendApplications queues explicit original applications in the pending
@@ -77,7 +69,7 @@ func (p *Producer) AppendApplications(apps []Application) error {
 	}
 	n, order := 0, p.applyOrder
 	for _, a := range apps {
-		if (a.Registered == nil && a.Name == "") || (a.Registered != nil && (a.LocalID == 0 || a.LocalID >= uint64(len(p.applications)) || !p.engine.MatchesApplicationPolicy(a.Registered, NumericID(a.LocalID, p.index, p.count)) || a.Name != "" || len(a.Policy) != 0)) || a.Order <= order || len(a.Points) == 0 || len(a.Points) != len(a.Sequence) || len(a.Points) > 32768 || n > 32768-len(a.Points) {
+		if (a.Registered == nil && a.Name == "") || (a.Registered != nil && (a.LocalID == 0 || a.LocalID >= uint64(len(p.applications)) || p.applications[a.LocalID] != a.Registered || a.Name != "" || len(a.Policy) != 0)) || a.Order <= order || len(a.Points) == 0 || len(a.Points) != len(a.Sequence) || len(a.Points) > 32768 || n > 32768-len(a.Points) {
 			return p.fail(errors.New("invalid original application"))
 		}
 
@@ -108,9 +100,6 @@ func (p *Producer) AppendApplications(apps []Application) error {
 				return p.fail(err)
 			}
 		}
-		if registered.NeedsDictID() {
-			p.admit = append(p.admit, registered) // Drain assigns the ID
-		}
 		if direct {
 			if err := out.Start(registered, a.Order, a.Clock, a.Points[0].Timestamp, len(a.Points)); err != nil {
 				return p.fail(err)
@@ -122,9 +111,9 @@ func (p *Producer) AppendApplications(apps []Application) error {
 		}
 		start := len(rows)
 		for j, point := range a.Points {
-			rows = append(rows, v2core.Row{ID: NumericID(id, p.index, p.count), Time: point.Timestamp, Bits: math.Float64bits(point.Value), Seq: a.Sequence[j]})
+			rows = append(rows, v2core.Row{ID: registered.ID(), Time: point.Timestamp, Bits: math.Float64bits(point.Value), Seq: a.Sequence[j]})
 		}
-		batches[i] = v2core.Batch{ID: NumericID(id, p.index, p.count), Order: a.Order, Clock: a.Clock, Points: rows[start:len(rows):len(rows)]}
+		batches[i] = v2core.Batch{ID: registered.ID(), Order: a.Order, Clock: a.Clock, Points: rows[start:len(rows):len(rows)]}
 		// Classic mirroring consumes the original immutable canonical bytes.
 		_, batches[i].Policy, _ = p.catalog.Lookup(id)
 	}

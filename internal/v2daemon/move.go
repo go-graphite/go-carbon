@@ -64,7 +64,7 @@ func (p *Producer) prepareMoveIDs(prepared *v2core.PreparedMove) (map[string]uin
 		if err != nil {
 			return nil, err
 		}
-		ids[name] = NumericID(id, p.index, p.count)
+		ids[name] = p.applications[id].ID()
 	}
 	if err := p.catalog.Sync(); err != nil {
 		return nil, p.fail(err)

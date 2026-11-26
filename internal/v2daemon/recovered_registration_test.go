@@ -58,7 +58,7 @@ func TestRecoveredRegistrationReusesBoundHandle(t *testing.T) {
 	if err := p.openCatalog(); err != nil {
 		t.Fatal(err)
 	}
-	want := s.Core.ApplicationPolicy(NumericID(1, 0, 1))
+	want := p.applications[1]
 	if want == nil {
 		t.Fatal("catalog recovery did not bind the identity")
 	}
@@ -68,19 +68,22 @@ func TestRecoveredRegistrationReusesBoundHandle(t *testing.T) {
 			t.Fatalf("registration changed identity: id=%d same=%v err=%v", id, h == want, err)
 		}
 	}
-	check() // size the producer slice before comparing cold and cached slots
-	warm := testing.AllocsPerRun(100, check)
-	cold := testing.AllocsPerRun(100, func() { p.applications[1] = nil; check() })
-	t.Logf("cached-slot allocations=%g recovered-slot allocations=%g", warm, cold)
-	if cold > warm {
-		t.Fatalf("recovered registration repeats name allocation: cold=%g cached=%g", cold, warm)
+	// The catalog binding is the only owner of the packed handle (the
+	// producer slice), so a bound local ID never has an empty slot; the
+	// recovered handle must be the dictionary admission's packed identity.
+	if !v2core.IsPackedID(want.ID()) {
+		t.Fatalf("recovered identity %d is not packed", want.ID())
 	}
+	if again, err := s.Core.AdmitIdentity(name, raw); err != nil || again != want {
+		t.Fatalf("re-admission changed identity: same=%v err=%v", again == want, err)
+	}
+	check()
+	t.Logf("recovered registration allocations=%g", testing.AllocsPerRun(100, check))
 	policy.Config.Method = sealrollup.Max
 	changed, err := v2core.EncodeRollupPolicy(policy)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p.applications[1] = nil
 	if _, _, err = p.RegisterApplication(name, changed); err == nil {
 		t.Fatal("accepted a changed recovered definition")
 	}
@@ -127,7 +130,7 @@ func TestRecoveredRegistrationReusesBoundHandle(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, meta, ok := snapshot.LookupMetadata(name)
-		if !ok || meta.ID != NumericID(1, 0, 1) || meta.Frontier.Order != p.applyOrder {
+		if !ok || meta.ID != want.ID() || meta.Frontier.Order != p.applyOrder {
 			t.Fatalf("recovered receiver lost installed metadata: ok=%v meta=%+v order=%d", ok, meta, p.applyOrder)
 		}
 		records, err := snapshot.Records(context.Background(), name)

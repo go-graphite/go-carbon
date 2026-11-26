@@ -28,7 +28,7 @@ func TestPolicyCatalogDictionaryOwnsNames(t *testing.T) {
 	}
 	for i, name := range []string{"plain.metric", `escaped.\"metric`, "unicode.é.metric", strings.Repeat("long.", 200) + "tail"} {
 		_, raw := rollupTestPolicy(t, name, "1s:1d", sealrollup.Last, .5)
-		h, err := c.intern(uint64(i+1), name, raw)
+		h, err := c.admit(name, raw)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -1,12 +1,15 @@
 package v2core
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/json"
+	"errors"
 	"slices"
 	"unsafe"
 
 	"github.com/go-graphite/go-carbon/internal/v2dict"
+	partsformat "github.com/go-graphite/go-carbon/internal/v2part"
 )
 
 // AdmitNames gives every identity in hs that has no dictionary ID yet its
@@ -139,3 +142,76 @@ func DictionaryDefinition(d *v2dict.Dict, group string, vshard uint16, id uint32
 // Dictionary returns the store name dictionary, nil while the store writes
 // name-keyed parts only.
 func (e *coreEngine) Dictionary() *v2dict.Dict { return e.identities.partDict() }
+
+// AdmitIdentity registers name under its packed dictionary ID: the group
+// comes from definition, the vshard from the name, and the dictionary entry
+// is looked up or appended (no fsync; the producer's drain syncs before core
+// sees the points). It returns nil without a store dictionary; the caller
+// keeps its catalog-derived ID. A deleted name revives under a new ID.
+func (e *coreEngine) AdmitIdentity(name string, definition []byte) (*ApplicationPolicy, error) {
+	return e.identities.admit(name, definition)
+}
+
+func (c *PolicyCatalog) admit(name string, definition []byte) (*PolicyIdentity, error) {
+	d := c.partDict()
+	if d == nil {
+		return nil, nil
+	}
+	group, suffix, err := c.admissionGroup(definition)
+	if err != nil {
+		return nil, err
+	}
+	vshard := partsformat.Route(partsformat.ID(name))
+	gi, err := c.GroupIndex(group)
+	if err != nil {
+		return nil, err
+	}
+	ent, ok := d.Lookup(string(group), vshard, unsafe.Slice(unsafe.StringData(name), len(name)))
+	if !ok || ent.Deleted() {
+		policy, err := d.InternPolicy(suffix)
+		if err != nil {
+			return nil, err
+		}
+		if ent, _, err = d.Append(string(group), vshard, unsafe.Slice(unsafe.StringData(name), len(name)), policy); err != nil {
+			return nil, err
+		}
+	}
+	id := PackID(gi, vshard, ent.ID)
+	if h := c.lookup(id); h != nil && h.name.Load() == nil {
+		// A dictionary-only handle (an ID-keyed part's): the lookup above
+		// proved the name, so only the policy bytes are left to compare.
+		if uint32(len(name)) != h.nameLen || !bytes.Equal(h.appendDefinitionName(nil, name), definition) {
+			return nil, errors.New("stored rollup policy changed")
+		}
+		return h, nil
+	}
+	h, err := c.intern(id, name, definition)
+	if err != nil {
+		return nil, err
+	}
+	h.rememberDictID(ent.ID)
+	return h, nil
+}
+
+// admissionGroup returns definition's group and policy suffix, parsing the
+// JSON only for the first name of a schema or an escaped name.
+func (c *PolicyCatalog) admissionGroup(definition []byte) (partsformat.Group, []byte, error) {
+	if n := canonicalNameEnd(definition); n > 0 {
+		if v, ok := c.definitions.Load(string(definition[n:])); ok {
+			return v.(*policyDefinition).Group, definition[n:], nil
+		}
+	}
+	var p RollupPolicy
+	if err := json.Unmarshal(definition, &p); err != nil {
+		return "", nil, err
+	}
+	enc, err := json.Marshal(string(p.Name))
+	if start := len(`{"Name":`) + len(enc) - 1; err != nil || len(definition) <= start {
+		return "", nil, errors.New("noncanonical rollup policy")
+	} else {
+		return p.Group, definition[start:], nil
+	}
+}
+
+// ID returns the engine ID the handle is registered under.
+func (h *PolicyIdentity) ID() uint64 { return h.id }

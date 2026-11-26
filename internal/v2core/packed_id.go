@@ -71,26 +71,35 @@ func (c *PolicyCatalog) GroupIndex(group partsformat.Group) (uint16, error) {
 	if err != nil {
 		return 0, err
 	}
+	return i, c.placeGroup(i, group)
+}
+
+// placeGroup installs group at packed index i, as the store dictionary or a
+// copied part's donor numbered it; i must not hold another group.
+func (c *PolicyCatalog) placeGroup(i uint16, group partsformat.Group) error {
 	if i >= maxPackedGroups {
-		return 0, errPackedGroups
-	}
-	if groups := c.packed.groups.Load(); groups != nil && int(i) < len(*groups) && (*groups)[i] != nil {
-		return i, nil
+		return errPackedGroups
 	}
 	p := &c.packed
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	var groups []*policyGroupPages
-	if g := p.groups.Load(); g != nil {
-		groups = *g
+	if groups := p.groups.Load(); groups == nil || int(i) >= len(*groups) || (*groups)[i] == nil {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		var groups []*policyGroupPages
+		if g := p.groups.Load(); g != nil {
+			groups = *g
+		}
+		if int(i) >= len(groups) || groups[i] == nil {
+			next := make([]*policyGroupPages, max(len(groups), int(i)+1))
+			copy(next, groups)
+			next[i] = &policyGroupPages{group: group}
+			p.groups.Store(&next)
+			return nil
+		}
 	}
-	if int(i) >= len(groups) || groups[i] == nil {
-		next := make([]*policyGroupPages, max(len(groups), int(i)+1))
-		copy(next, groups)
-		next[i] = &policyGroupPages{group: group}
-		p.groups.Store(&next)
+	if (*p.groups.Load())[i].group != group {
+		return errors.New("v2core: packed group index names another group")
 	}
-	return i, nil
+	return nil
 }
 
 // packedSlot returns the identity slot of packed ID id, creating its page
@@ -154,8 +163,9 @@ func (c *PolicyCatalog) packedGroup(id uint64) (partsformat.Group, bool) {
 // vshard, so no identity is published under another dictionary range.
 func (c *PolicyCatalog) packedMatches(h *PolicyIdentity) bool {
 	group, ok := c.packedGroup(h.id)
-	_, v, _ := UnpackID(h.id)
-	return ok && group == h.policy.Group && v == h.vshard
+	g, v, _ := UnpackID(h.id)
+	// A group known only to the dictionary gets its pages here.
+	return ok && group == h.policy.Group && v == h.vshard && c.placeGroup(g, group) == nil
 }
 
 // PackedName resolves a packed ID's name: from its registered identity, else
@@ -195,4 +205,28 @@ func (c *PolicyCatalog) dictGroup(g uint16) (partsformat.Group, bool) {
 	}
 	group, ok := d.Group(g)
 	return partsformat.Group(group), ok
+}
+
+// dictIdentity registers packed ID id from the store dictionary alone: its
+// name and durable policy suffix. L0 replay uses it for names no catalog
+// bound in this process.
+func (c *PolicyCatalog) dictIdentity(id uint64) (*PolicyIdentity, error) {
+	group, ok := c.packedGroup(id)
+	if !ok {
+		return nil, errors.New("unknown packed group")
+	}
+	if _, err := c.GroupIndex(group); err != nil { // creates the group's pages
+		return nil, err
+	}
+	_, vshard, dict := UnpackID(id)
+	def, ok := DictionaryDefinition(c.partDict(), string(group), vshard, dict)
+	if !ok {
+		return nil, errors.New("no live dictionary entry")
+	}
+	h, err := c.intern(id, "", def)
+	if err != nil {
+		return nil, err
+	}
+	h.rememberDictID(dict)
+	return h, nil
 }

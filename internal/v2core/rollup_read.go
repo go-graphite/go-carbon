@@ -1032,6 +1032,13 @@ func newCopiedRollupSnapshot(ctx context.Context, snapshot *pebble.Snapshot, pri
 						catalog = &PolicyCatalog{}
 					}
 					out.sourceIdentities[origin] = catalog
+					// A donor's packed ID names its group by the donor's index.
+					if IsPackedID(meta.ID) {
+						gi, _, _ := UnpackID(meta.ID)
+						if err = catalog.placeGroup(gi, key.Group); err != nil {
+							return nil, err
+						}
+					}
 					h, err := catalog.intern(meta.ID, string(key.Metric), meta.Policy)
 					if err != nil {
 						return nil, err

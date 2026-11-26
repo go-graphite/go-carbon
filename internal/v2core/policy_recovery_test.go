@@ -15,9 +15,9 @@ func TestPolicyRecoveryExact(t *testing.T) {
 	c := &PolicyCatalog{}
 	c.dict.Store(d)
 	engine := &coreEngine{identities: c}
-	for i, name := range []string{"plain.metric", `escaped.\"metric`, "unicode.é.metric"} {
+	for _, name := range []string{"plain.metric", `escaped.\"metric`, "unicode.é.metric"} {
 		_, raw := rollupTestPolicy(t, name, "1s:1d", sealrollup.Last, .5)
-		h, err := c.intern(uint64(i+1), name, raw)
+		h, err := c.admit(name, raw)
 		if err != nil {
 			t.Fatal(err)
 		}

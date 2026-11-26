@@ -441,7 +441,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 			if err != nil {
 				return err
 			}
-			o := &coreOwner{index: s, partSource: partSource, stage: hooks.Stage, sealTiming: hooks.SealTiming, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), lookup: identities.lookup}
+			o := &coreOwner{index: s, partSource: partSource, stage: hooks.Stage, sealTiming: hooks.SealTiming, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), lookup: identities.rowLookup}
 			if hooks.VisiblePending != nil {
 				o.visible = func(v PendingView) { hooks.VisiblePending(s, v) }
 			} else if hooks.Visible != nil {
@@ -1064,7 +1064,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		// L0 files precede visibility: a render never shows a row a kill -9
 		// loses. Without a publication hook they still follow its cadence.
 		if o.cfg.L0 && pend.n > l0Written {
-			path, err := o.writeL0(pend.rawView(nil).Suffix(l0Written))
+			path, err := o.writeL0(pend.rawView(o.lookup).Suffix(l0Written)) // L0 writes durable IDs
 			if err != nil {
 				return err
 			}

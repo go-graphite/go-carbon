@@ -27,8 +27,9 @@ func (v PendingView) sealKeys(keys, spare []uint64) (sorted, tmp []uint64, maxID
 		if s.cold != nil {
 			for i := range s.cold {
 				b := &s.cold[i]
-				keys = append(keys, b.ID<<32|(start+uint64(i)))
-				maxID = max(maxID, b.ID)
+				id := b.rowID()
+				keys = append(keys, id<<32|(start+uint64(i)))
+				maxID = max(maxID, id)
 				points += len(b.Points)
 			}
 			continue
@@ -110,7 +111,7 @@ func sealScratch[S ~[]E, E any](s S, n int) S {
 func (v PendingView) idAt(pos int) uint64 {
 	s := v.seg(pos)
 	if s.cold != nil {
-		return s.cold[pos-s.start].ID
+		return s.cold[pos-s.start].rowID()
 	}
 	row := s.firstRow() + uint32(pos-s.start)
 	if e, ok := s.escape(row); ok {

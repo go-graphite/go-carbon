@@ -144,7 +144,7 @@ func TestMoveIDKeyedSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer target.Close()
-	if err = target.AdoptMove(t.Context(), prepared, map[string]uint64{"move.metric": 7}, 1010); err != nil {
+	if err = target.AdoptMove(t.Context(), prepared, map[string]uint64{"move.metric": writerID(t, target.identities, 7, adoptPolicy(t, sealrollup.Sum))}, 1010); err != nil {
 		t.Fatal(err)
 	}
 	_, records := adoptedRecords(t, target)

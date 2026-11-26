@@ -401,6 +401,7 @@ func (r *coreRollups) pendingMetadataDue(h *pendingHead, lookup func(uint64) *Ap
 	if h.unresolved {
 		due := false
 		h.rawView(lookup).IDs(h.scanned, h.n, func(_ int, id uint64, cold *coreBatch) bool {
+			id = durableID(id, lookup)
 			b := coreBatch{ID: id, Registered: lookup(id)}
 			if cold != nil {
 				b = *cold
@@ -438,6 +439,7 @@ func (r *coreRollups) noteNewNames(h *pendingHead, lookup func(uint64) *Applicat
 		return
 	}
 	visit := func(id uint64) {
+		id = durableID(id, lookup)
 		if _, ok := h.freshIDs[id]; ok {
 			return
 		}
@@ -655,6 +657,14 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 		if view.lookup != nil {
 			registered = view.lookup(id)
 		}
+		// The head groups by row ID (a packed identity's slot); the plan
+		// keys metrics by the durable ID, the expiry bitset by the row ID.
+		row := id
+		if registered != nil {
+			id = registered.id
+		} else if first.cold != nil {
+			id = first.cold.ID
+		}
 		firstRegistered, firstPolicy := registered, []byte(nil)
 		if first.cold != nil {
 			firstRegistered, firstPolicy = first.cold.Registered, first.cold.Policy
@@ -712,7 +722,7 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 			r.stageKey(s, m, dict)
 		}
 		if len(seen) != 0 {
-			seen[id>>6] |= 1 << (id & 63)
+			seen[row>>6] |= 1 << (row & 63)
 		}
 		for k := i; k < j; k++ {
 			a := first
@@ -746,7 +756,15 @@ func (r *coreRollups) planParts(in coreSealInput) (coreSealPlan, error) {
 	r.reresolve(now) // returns at once without expiry
 	r.expDrained = r.expiries.due(r.planNow, 0, r.expDrained[:0])
 	if r.expire != nil {
-		r.due = r.expirySlots(func(id uint64) bool { return sealKeySeen(keys, seen, maxID, id, keyID) }, r.due[:0])
+		// The owner files durable IDs; the keys hold row IDs.
+		r.due = r.expirySlots(func(id uint64) bool {
+			if view.lookup != nil {
+				if h := view.lookup(id); h != nil && h.id == id && h.rowID() != id && sealKeySeen(keys, seen, maxID, h.rowID(), keyID) {
+					return true
+				}
+			}
+			return sealKeySeen(keys, seen, maxID, id, keyID)
+		}, r.due[:0])
 		for _, slot := range r.due {
 			m := r.slotMetric(slot)
 			stages, metrics = append(stages, rollupStage{next: r.meta[slot], slot: slot}), append(metrics, m)
@@ -885,9 +903,23 @@ func (e *rollupScanEntry) addMetadata(identities *PolicyCatalog, k partsformat.K
 	if !compactMetadata(m).after(e.meta) {
 		return nil
 	}
-	h, err := scanIdentity(identities, m.ID, string(k.Metric), m.Policy)
+	// With a store dictionary a recovered name takes its packed ID, as the
+	// read path does (readIdentity): a legacy NumericID is not interned.
+	id, named := m.ID, uint32(0)
+	if identities != nil {
+		if id, err = identities.keyEngineID(id, k); err == nil && !k.ByID {
+			id, named, err = identities.nameEngineID(id, k, m.Policy)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	h, err := scanIdentity(identities, id, string(k.Metric), m.Policy)
 	if err != nil {
 		return err
+	}
+	if named != 0 {
+		h.rememberDictID(named - 1)
 	}
 	if h.policy.prepared.Digest() != m.Frontier.Policy {
 		return errors.New("rollup policy/frontier mismatch")

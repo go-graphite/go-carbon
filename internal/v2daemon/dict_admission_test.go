@@ -53,7 +53,7 @@ func admitted(t *testing.T, s *Store, name string) (*v2core.ApplicationPolicy, u
 	if local == 0 {
 		t.Fatalf("%s not in the catalog", name)
 	}
-	h := s.Core.ApplicationPolicy(NumericID(local, p.index, p.count))
+	h := p.applications[local]
 	id, ok := h.DictID()
 	if !ok {
 		t.Fatalf("%s has no dictionary ID after its drain", name)
@@ -95,21 +95,16 @@ func TestAdmissionAssignsDictionaryIDs(t *testing.T) {
 		apps = append(apps, admitApp(t, fmt.Sprintf("admit.%d", i), uint64(i+1)))
 	}
 	apps = append(apps, admitApp(t, "admit.0", 41)) // a repeat in the same drain
+	gen := s.Core.Dictionary().Generation()
 	if err = p.AppendApplications(apps); err != nil {
 		t.Fatal(err)
 	}
-	if len(p.admit) != len(apps) {
-		t.Fatalf("queued %d names for admission, want %d", len(p.admit), len(apps))
+	// Admission assigns the packed dictionary ID; the drain makes it durable.
+	if h := p.applications[1]; h == nil || h.NeedsDictID() || !v2core.IsPackedID(h.ID()) {
+		t.Fatal("a new name has no packed dictionary ID at admission")
 	}
-	if h := s.Core.ApplicationPolicy(NumericID(1, 0, 1)); !h.NeedsDictID() {
-		t.Fatal("a new name has a dictionary ID before its drain")
-	}
-	gen := s.Core.Dictionary().Generation()
 	if err = p.Drain(); err != nil {
 		t.Fatal(err)
-	}
-	if len(p.admit) != 0 {
-		t.Fatal("drain kept the admission queue")
 	}
 	if g := s.Core.Dictionary().Generation(); g-gen != 40 {
 		t.Fatalf("drain made %d dictionary records durable, want 40 (one per new name)", g-gen)
@@ -122,9 +117,6 @@ func TestAdmissionAssignsDictionaryIDs(t *testing.T) {
 	// Known names queue nothing; the seal finds every ID present.
 	if err = p.AppendApplications([]Application{admitApp(t, "admit.1", 42)}); err != nil {
 		t.Fatal(err)
-	}
-	if len(p.admit) != 0 {
-		t.Fatal("a name with a dictionary ID was queued again")
 	}
 	if err = p.Drain(); err != nil {
 		t.Fatal(err)
@@ -370,7 +362,7 @@ func TestAdmissionOldDictionary(t *testing.T) {
 	if err = p.Drain(); err != nil {
 		t.Fatal(err)
 	}
-	h := s.Core.ApplicationPolicy(NumericID(p.catalog.Find(name), 0, 1))
+	h := p.applications[p.catalog.Find(name)]
 	id, ok := h.DictID()
 	if !ok || id != e.ID {
 		t.Fatalf("old name got ID %d ok=%v, want %d", id, ok, e.ID)
