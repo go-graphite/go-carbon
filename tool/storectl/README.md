@@ -985,10 +985,35 @@ are installed. Run `storectl maintain ACTION --help` for action flags.
 | `storectl maintain cold-pack` | Pack, unpack or downgrade an exclusively opened offline store; see [cold-pack](../../doc/cold-pack.md). |
 | `storectl maintain convert` | Import complete Whisper archives with identity-bound resume and verification; see [conversion](../../doc/shared-exact-blocks.md#bulk-conversion). |
 | `storectl maintain prune-empty-dirs` | Remove empty original directories while checking daemon readiness; see [pruning](../../internal/storemaint/prune/README.md). |
-| `storectl maintain reclaim-orphans` | Inspect orphaned staged imports offline; `-apply` publishes reclaimed ownership. |
+| `storectl maintain reclaim-orphans` | Inspect orphaned staged imports offline; `-apply` publishes reclaimed ownership. With `-unreferenced-ids -below-id ID`, count (or with `-apply` delete) the keys of metric IDs that nothing references. |
 
 Offline actions retain the store's exclusive-open and source-binding checks.
 Stop the daemon before cold-pack, conversion into its store, or orphan reclaim.
+
+### Unreferenced metric IDs
+
+A metric generation keeps its data under per-ID key spaces: chunks (`c`),
+metric-prefixed continuation keys (`u`), continuation keys in every time bucket
+(`t` + bucket + `u`), revisions (`r`), transfer receipts (`a`) and mutation
+histories (`proof/ranges/`). When a catalog record is replaced or removed
+without dropping them, nothing reads them again and compaction keeps them.
+
+`storectl maintain reclaim-orphans -store DIR -unreferenced-ids -below-id ID`
+builds a bitmap of every referenced ID: catalog records, native reservations
+and receipts, combine intents, origins and pieces, staged transfer deletes and
+pending file cleanups. It then reports each maximal run of other IDs in
+`[-from-id, -below-id)` that still holds keys, per key space, with byte
+estimates (`EstimateDiskUsage`). The fence must be at least `-margin-ids`
+(default 16,777,216) below the allocator watermark, so recent reservations are
+never swept. The dry run opens the store read-only; `-apply` writes one range
+deletion per run and key space, and compaction frees the space later.
+`-min-run-ids N` leaves shorter runs alone, which bounds the number of range
+deletions; `-count-keys` also counts the keys (it scans every range).
+
+```sh
+storectl maintain reclaim-orphans -store /var/lib/carbon/store -unreferenced-ids -below-id 300000000 -from-id 90000000
+storectl maintain reclaim-orphans -store /var/lib/carbon/store -unreferenced-ids -below-id 300000000 -from-id 90000000 -apply
+```
 Pruning checks the running local daemon and retains its health and filesystem
 guards. Existing maintenance checkpoints and receipts retain their data format.
 
