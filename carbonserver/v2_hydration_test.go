@@ -36,6 +36,10 @@ func TestV2RestartHydrationFindRenderDifferential(t *testing.T) {
 			t.Fatal(err)
 		}
 		reader.Identities = &v2core.PolicyCatalog{}
+		// Renders clamp their start to the clock minus the retention: a wall
+		// clock moves the 30-day start when a minute ends between captures.
+		// 15 days after the points, both spans read the 60 s archive.
+		reader.Now = func() time.Time { return time.Unix(now+15*86400, 0) }
 		engine, err = v2core.Open(root, cfg, v2core.Hooks{IDKeys: true, Identities: reader.Identities, PublishPending: reader.PublishPending, Stage: stage, Now: func() time.Time { return time.Unix(1, 0) }})
 		if err != nil {
 			reader.Close()
