@@ -85,7 +85,8 @@ func TestRecoveredRegistrationReusesBoundHandle(t *testing.T) {
 		t.Fatal("accepted a changed recovered definition")
 	}
 	// An owner recreated after recovery must use the persisted policy for an
-	// existing name. The resolver still owns admission and refusal of new names.
+	// existing name. Its first receiver-table admission drains immediately; the
+	// resolver still owns admission and refusal of new names.
 	calls := 0
 	rejected := 0
 	o := &applicationOwner{p: p, resolve: func(string) ([]byte, error) {
@@ -96,13 +97,13 @@ func TestRecoveredRegistrationReusesBoundHandle(t *testing.T) {
 	if err := o.AppendBytes([]byte(name), []int{len(name)}, nil, data, nil, 1010); err != nil {
 		t.Fatal(err)
 	}
-	if calls != 0 || rejected != 0 || p.pendingRows != 1 || o.names.Len() != 1 {
+	if calls != 0 || rejected != 0 || p.pendingRows != 0 || o.names.Len() != 1 {
 		t.Fatalf("recovered receiver repeated admission: calls=%d rejected=%d pending=%d names=%d", calls, rejected, p.pendingRows, o.names.Len())
 	}
 	if err := o.Append([]string{"brand.new.name"}, nil, data, nil, 1010); err != nil {
 		t.Fatal(err)
 	}
-	if calls != 1 || rejected != 1 || p.catalog.Count() != 1 || p.pendingRows != 1 {
+	if calls != 1 || rejected != 1 || p.catalog.Count() != 1 || p.pendingRows != 0 {
 		t.Fatalf("new admission bypassed resolver: calls=%d rejected=%d catalog=%d pending=%d", calls, rejected, p.catalog.Count(), p.pendingRows)
 	}
 	// Exercise the recovered handle through pending classification and the
@@ -155,7 +156,7 @@ func TestRecoveredRegistrationReusesBoundHandle(t *testing.T) {
 	if err := coldReceiver.Append([]string{name}, nil, probePoints(1), nil, 1030); err != nil {
 		t.Fatal(err)
 	}
-	if p.catalog == nil || p.pendingRows != 1 || coldReceiver.names.Len() != 1 {
+	if p.catalog == nil || p.pendingRows != 0 || coldReceiver.names.Len() != 1 {
 		t.Fatal("cold intake did not open and reuse the persisted catalog")
 	}
 }
