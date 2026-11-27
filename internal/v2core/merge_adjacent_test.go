@@ -14,7 +14,7 @@ func TestMergeSelectsSequenceAdjacentWindow(t *testing.T) {
 	e := mergeFixtureIdle(t, t.TempDir(), nil)
 	defer e.close()
 	o := e.owners[0]
-	for n := uint64(1); n <= 9; n++ {
+	for n := uint64(1); n <= sealedMergeFanIn; n++ {
 		mergeAppend(t, e, n)
 	}
 	s := o.db.NewSnapshot()
@@ -33,7 +33,7 @@ func TestMergeSelectsSequenceAdjacentWindow(t *testing.T) {
 			t.Fatalf("inputs out of sequence order at %d", i)
 		}
 	}
-	if len(inputs) != smallMergeRatio || 2*total < smallMergeRatio*largest {
+	if len(inputs) != sealedMergeFanIn || 2*total < sealedMergeFanIn*largest {
 		t.Fatalf("window of %d parts, total %d, largest %d", len(inputs), total, largest)
 	}
 	lo, hi := inputs[0].Source.MinOrder, inputs[len(inputs)-1].Source.MaxOrder
@@ -50,12 +50,10 @@ func TestMergeSelectsSequenceAdjacentWindow(t *testing.T) {
 		}
 	}
 
-	for n := uint64(10); n <= 16; n++ {
-		mergeAppend(t, e, n)
-	}
 	s = o.db.NewSnapshot()
 	want := mergeRead(t, s)
 	s.Close()
+	wantMerges := 1
 	merges := 0
 	for {
 		changed, err := o.mergeSealedParts(nil, false)
@@ -67,8 +65,8 @@ func TestMergeSelectsSequenceAdjacentWindow(t *testing.T) {
 		}
 		merges++
 	}
-	if live := e.PartGCStats()[0].LiveParts; live != 1 || merges != 5 {
-		t.Fatalf("16 parts folded into %d live parts with %d merges, want 1 and 5", live, merges)
+	if live := e.PartGCStats()[0].LiveParts; live != 1 || merges != wantMerges {
+		t.Fatalf("16 parts folded into %d live parts with %d merges, want 1 and %d", live, merges, wantMerges)
 	}
 	s = o.db.NewSnapshot()
 	defer s.Close()

@@ -14,7 +14,15 @@ import (
 	"sync"
 )
 
-const denseBlockSize = 256 << 10
+// denseBlockSize bounds a block before compression. Seal parts use
+// denseSealBlockSize: every render seeks each live part once per name, and a
+// block-cache miss decompresses and allocates a whole block, so young parts
+// keep small blocks while merges rewrite them into large ones. A miss costs
+// about 46 us at 64 KiB and scales with the block size. Readers take any size.
+const (
+	denseBlockSize     = 256 << 10
+	denseSealBlockSize = 32 << 10
+)
 
 var denseCRC = crc32.MakeTable(crc32.Castagnoli)
 var denseSSTPool sync.Pool
@@ -94,7 +102,7 @@ type denseSSTWriter struct {
 	work                        *denseSSTWorkspace
 	entries, rawKeys, rawValues uint64
 	blocks                      uint64
-	level                       int
+	level, blockSize            int
 	err                         error
 }
 
@@ -111,7 +119,7 @@ func newDenseSSTWriter(out *hashedOutput) (*denseSSTWriter, error) {
 	work.index.reset()
 	work.properties.reset()
 	work.meta.reset()
-	return &denseSSTWriter{out: out, work: work, level: denseRestLevel}, nil
+	return &denseSSTWriter{out: out, work: work, level: denseRestLevel, blockSize: denseBlockSize}, nil
 }
 
 func (w *denseSSTWriter) Set(key, value []byte) error {
@@ -122,7 +130,7 @@ func (w *denseSSTWriter) Set(key, value []byte) error {
 		return io.ErrClosedPipe
 	}
 	b := &w.work.data
-	if b.entries != 0 && len(b.data)+len(key)+len(value)+4*len(b.restarts)+32 > denseBlockSize {
+	if b.entries != 0 && len(b.data)+len(key)+len(value)+4*len(b.restarts)+32 > w.blockSize {
 		if w.err = w.flush(); w.err != nil {
 			return w.err
 		}

@@ -131,8 +131,8 @@ func TestSealedMergeRepacksRunsToCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const perInput = 1200
-	for n := 1; n <= smallMergeRatio; n++ {
+	const perInput = 400 // total must exceed one dense run (4096 slots) and fit the 4h archive
+	for n := 1; n <= sealedMergeFanIn; n++ {
 		var rs []sealrollup.Record
 		for i := 0; i < perInput; i++ {
 			slot := int64((n-1)*perInput + i)
@@ -144,7 +144,7 @@ func TestSealedMergeRepacksRunsToCap(t *testing.T) {
 			rs = append(rs, sealrollup.Record{Delta: sealrollup.Delta{Archive: 0, Slot: slot, Order: order, Sample: sealrollup.Sample{Time: 1000 + slot, Bits: bits, Sequence: order}}, Correction: i%7 == 0})
 		}
 		rs = append(rs, sealrollup.Record{Delta: sealrollup.Delta{Archive: 1, Slot: int64(n), Order: uint64(n), Sample: sealrollup.Sample{Time: 1000 + int64(n)*60, Bits: uint64(n), Sequence: uint64(n)}}})
-		m := RollupMetadata{Version: 2, ID: 7, Policy: raw, Frontier: sealrollup.Frontier{Order: uint64(n), MaxTime: 1000 + int64(smallMergeRatio*perInput), Policy: digest}, Revision: uint64(n)}
+		m := RollupMetadata{Version: 2, ID: 7, Policy: raw, Frontier: sealrollup.Frontier{Order: uint64(n), MaxTime: 1000 + int64(sealedMergeFanIn*perInput), Policy: digest}, Revision: uint64(n)}
 		installMergeRecords(t, e.owners[0], byte(n), []RollupMetadata{m}, [][]sealrollup.Record{rs})
 	}
 	s := e.owners[0].db.NewSnapshot()
@@ -169,12 +169,12 @@ func TestSealedMergeRepacksRunsToCap(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		total := smallMergeRatio * perInput
+		total := sealedMergeFanIn * perInput
 		runs := partRunLengths(t, gcPath(e.owners[0].gc, d))
 		if got, want := runs["merge.repack/0"], []int{v2part.MaxDenseSlots, total - v2part.MaxDenseSlots}; !slices.Equal(got, want) {
 			t.Fatalf("archive 0 runs %v, want %v", got, want)
 		}
-		if got := runs["merge.repack/1"]; !slices.Equal(got, []int{smallMergeRatio}) {
+		if got := runs["merge.repack/1"]; !slices.Equal(got, []int{sealedMergeFanIn}) {
 			t.Fatalf("archive 1 runs %v", got)
 		}
 		// A second merge copies the full run and keeps the layout.

@@ -215,21 +215,8 @@ func (e *coreEngine) ForceMerge() (int, error) {
 // qualifies once its total is
 // at least ratio/2 times its largest part, so a large input is not repeatedly
 // combined with only a few much smaller inputs. Fresh windows also wait for
-// ratio inputs; aged windows need only the size balance. Small outputs use ratio 4,
-// so new seals fold into a small
-// part every few seal intervals and few small parts stay live for renders.
-// Larger outputs keep ratio sixteen. The cheapest qualifying range merges first.
-const (
-	smallMergeBytes = 64 << 20
-	smallMergeRatio = 4
-)
-
-func mergeRatio(total uint64) uint64 {
-	if total <= smallMergeBytes {
-		return smallMergeRatio
-	}
-	return sealedMergeFanIn
-}
+// ratio inputs; aged windows need only the size balance. The ratio is the fan-in, sixteen, at every size, so
+// new seals fold into a small part less often, cutting rewrite volume. The cheapest qualifying range merges first.
 
 // full keeps adjacency and the byte cap, but ignores background ratios and fan-in.
 func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64, full bool) ([]v2part.Descriptor, error) {
@@ -284,10 +271,10 @@ func (o *coreOwner) selectMergeLimit(snapshot *pebble.Snapshot, limit uint64, fu
 					}
 					continue
 				}
-				if j == i || 2*total < mergeRatio(total)*largest {
+				if j == i || 2*total < sealedMergeFanIn*largest {
 					continue
 				}
-				if uint64(j-i+1) < mergeRatio(total) && !o.mergeRangeOld(parts[i:j+1]) {
+				if j-i+1 < sealedMergeFanIn && !o.mergeRangeOld(parts[i:j+1]) {
 					continue
 				}
 				if chosen == nil || total < best || total == best && (s.group < bestScope.group || s.group == bestScope.group && s.partition < bestScope.partition) {
