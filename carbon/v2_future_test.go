@@ -11,6 +11,8 @@ import (
 
 // future-limit defaults to 48h, "0s" disables it, and each dropped point
 // counts once in v2_future_dropped_points_total, not as a name refusal.
+// Two reads of one file compare equal on V2, which configure() requires to
+// accept a reload.
 func TestV2FutureLimitConfigAndCounter(t *testing.T) {
 	if got := NewConfig().V2.FutureLimit.Value(); got != 48*time.Hour {
 		t.Fatalf("default future-limit %v, want 48h", got)
@@ -26,6 +28,13 @@ func TestV2FutureLimitConfigAndCounter(t *testing.T) {
 		}
 		if got := cfg.V2.FutureLimit.Value(); got != want {
 			t.Fatalf("%q: future-limit %v, want %v", body, got, want)
+		}
+		again, err := ReadConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.V2 != again.V2 {
+			t.Fatalf("%q: V2 differs between two reads of one file, so a reload would be refused", body)
 		}
 	}
 	v := &v2Runtime{metrics: &v2ModeMetrics{}}

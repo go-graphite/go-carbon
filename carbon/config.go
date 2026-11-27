@@ -457,7 +457,7 @@ func NewLoggingConfig() zapwriter.Config {
 // NewConfig ...
 func NewConfig() *Config {
 	cfg := &Config{
-		V2: v2Config{IDKeys: true, FutureLimit: &Duration{48 * time.Hour}},
+		V2: v2Config{IDKeys: true, FutureLimit: Duration{48 * time.Hour}},
 		Buckyd: buckyd.Config{
 			Bind: "0.0.0.0:4242", Hash: "carbon", Replicas: 1,
 			TmpDir: os.TempDir(), Timeout: 3600,
