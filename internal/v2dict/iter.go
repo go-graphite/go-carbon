@@ -3,6 +3,7 @@ package v2dict
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"iter"
 	"os"
@@ -276,23 +277,46 @@ func mergeStart(levels []*level, fanout int) int {
 	return -1
 }
 
+// maxMergers is how many merges run at once, over disjoint levels: one may
+// rewrite the base while another keeps the newer levels merged, so flushed
+// levels never pile up behind a merge whose time grows with the name count.
+const maxMergers = 2
+
+// nextMerge returns the due merge among the levels no running merge holds:
+// in the oldest contiguous run of free levels that has one. The caller holds
+// mergeMu.
+func (d *Dict) nextMerge() []*level {
+	levels := d.snap.Load().levels
+	for lo := 0; lo < len(levels); {
+		hi := lo
+		for hi < len(levels) && !slices.Contains(d.busy, levels[hi]) {
+			hi++
+		}
+		if i := mergeStart(levels[lo:hi], d.opt.Fanout); i >= 0 {
+			return levels[lo+i : hi]
+		}
+		lo = hi + 1
+	}
+	return nil
+}
+
+// maybeMerge starts a merge goroutine (lane) when a merge is due and fewer
+// than maxMergers run.
 func (d *Dict) maybeMerge() {
-	if d.opt.NoMerge || !d.merging.CompareAndSwap(false, true) {
+	if d.opt.NoMerge {
 		return
 	}
+	d.mergeMu.Lock()
+	defer d.mergeMu.Unlock()
+	if d.mergers >= maxMergers || d.nextMerge() == nil {
+		return
+	}
+	d.mergers++
 	d.mergeWG.Add(1)
 	go func() {
 		defer d.mergeWG.Done()
-		for {
-			for d.mergeOnce() {
-			}
-			d.merging.Store(false)
-			d.mu.RLock()
-			stop := d.closed || d.err != nil // a failed merge is not retried in a loop
-			d.mu.RUnlock()
-			if stop || mergeStart(d.snap.Load().levels, d.opt.Fanout) < 0 || !d.merging.CompareAndSwap(false, true) {
-				return
-			}
+		for d.mergeOnce(true) {
+			d.maybeMerge() // a free lane takes the levels this one does not hold
 		}
 	}()
 }
@@ -301,7 +325,7 @@ func (d *Dict) maybeMerge() {
 func (d *Dict) Merge() {
 	d.flushWG.Wait()
 	d.mergeWG.Wait()
-	for d.mergeOnce() {
+	for d.mergeOnce(false) {
 	}
 }
 
@@ -316,30 +340,71 @@ func (d *Dict) MergeAll() error {
 	return d.merge(levels)
 }
 
-func (d *Dict) mergeOnce() bool {
-	levels := d.snap.Load().levels
-	i := mergeStart(levels, d.opt.Fanout)
-	if i < 0 {
+// mergeOnce runs the next due merge and reports whether it succeeded. A lane
+// leaves the mergers count in the lock hold that finds no merge due (or
+// after its merge failed), so a level installed after that hold starts a
+// lane itself: no due merge waits for a lane that is leaving.
+func (d *Dict) mergeOnce(lane bool) bool {
+	d.mergeMu.Lock()
+	d.mu.RLock()
+	stop := d.closed || d.err != nil // a failed merge is not retried in a loop
+	d.mu.RUnlock()
+	var in []*level
+	if !stop {
+		in = d.nextMerge()
+	}
+	if in == nil {
+		if lane {
+			d.mergers--
+		}
+		d.mergeMu.Unlock()
 		return false
 	}
-	return d.mergeKind(levels[i:], true) == nil
+	d.busy = append(d.busy, in...)
+	d.mergeMu.Unlock()
+	return d.runMerge(in, lane) == nil
 }
 
-// merge writes the newest entry of every key of in (sequence-adjacent
-// levels) to one level, installs it in their place and removes them.
-func (d *Dict) merge(in []*level) error { return d.mergeKind(in, true) }
+var errInputsChanged = errors.New("v2dict: merge inputs changed")
 
-func (d *Dict) mergeKind(in []*level, compact bool) error {
+// merge writes the newest entry of every key of in (sequence-adjacent
+// levels) to one level, installs it in their place and removes them, unless
+// a running merge holds one of them.
+func (d *Dict) merge(in []*level) error {
 	if len(in) == 0 {
 		return nil
 	}
 	d.mergeMu.Lock()
-	defer d.mergeMu.Unlock()
+	for _, l := range in {
+		if slices.Contains(d.busy, l) {
+			d.mergeMu.Unlock()
+			return errInputsChanged
+		}
+	}
+	d.busy = append(d.busy, in...)
+	d.mergeMu.Unlock()
+	return d.runMerge(in, false)
+}
+
+// runMerge writes in, which the caller added to busy, and frees it. A lane
+// whose merge failed leaves the mergers count in the same lock hold.
+func (d *Dict) runMerge(in []*level, lane bool) error {
+	err := d.writeMerge(in)
+	d.mergeMu.Lock()
+	d.busy = slices.DeleteFunc(d.busy, func(l *level) bool { return slices.Contains(in, l) })
+	if err != nil && lane {
+		d.mergers--
+	}
+	d.mergeMu.Unlock()
+	return err
+}
+
+func (d *Dict) writeMerge(in []*level) error {
 	d.mu.RLock()
 	closed := d.closed
 	d.mu.RUnlock()
 	if closed || slices.Index(d.snap.Load().levels, in[0]) < 0 {
-		return fmt.Errorf("v2dict: merge inputs changed") // an earlier merge took them
+		return errInputsChanged // an earlier merge took them
 	}
 	its := make([]levelIter, len(in))
 	for i, l := range in {
@@ -347,12 +412,13 @@ func (d *Dict) mergeKind(in []*level, compact bool) error {
 		its[i].next()
 	}
 	var cur []byte
-	out, err := writeLevelKind(levelPath(d.dir, in[0].minSeq, in[len(in)-1].maxSeq), in[0].minSeq, in[len(in)-1].maxSeq, compact, func(w *levelWriter) {
+	out, err := writeLevelKind(levelPath(d.dir, in[0].minSeq, in[len(in)-1].maxSeq), in[0].minSeq, in[len(in)-1].maxSeq, true, func(w *levelWriter) {
 		n := 0
 		for _, l := range in {
 			n += l.n
 		}
 		w.reserve(n)
+		_ = hook("merge-write") // the output's .tmp exists
 		for {
 			best := -1
 			for i := len(its) - 1; i >= 0; i-- {
@@ -390,7 +456,7 @@ func (d *Dict) mergeKind(in []*level, compact bool) error {
 		if out.path != in[0].path {
 			os.Remove(out.path)
 		}
-		return fmt.Errorf("v2dict: merge inputs changed")
+		return errInputsChanged
 	}
 	next := slices.Concat(cur2[:at], []*level{out}, cur2[at+len(in):])
 	d.snap.Store(&snapshot{frozen: d.snap.Load().frozen, levels: next})

@@ -27,7 +27,7 @@ func TestAdmissionCloseDuringSingleRewrite(t *testing.T) {
 	}
 	defer func() { testHook = nil }()
 	merged := make(chan error, 1)
-	go func() { merged <- d.mergeKind(d.snap.Load().levels, true) }()
+	go func() { merged <- d.merge(d.snap.Load().levels) }()
 	select {
 	case <-entered:
 	case <-time.After(3 * time.Second):
