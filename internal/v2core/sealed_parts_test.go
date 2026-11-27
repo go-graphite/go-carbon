@@ -90,7 +90,8 @@ func TestSealedPartCrashPublicationAndReplay(t *testing.T) {
 		}
 		t.Fatal("crash boundary not reached")
 	}
-	for _, phase := range []string{"part-retained", "commit"} {
+	// "ingest" fires after the one parts/ sync, just before the synced publish batch.
+	for _, phase := range []string{"part-retained", "ingest", "commit"} {
 		t.Run(phase, func(t *testing.T) {
 			root := t.TempDir()
 			cmd := exec.Command(os.Args[0], "-test.run=^TestSealedPartCrashPublicationAndReplay$")

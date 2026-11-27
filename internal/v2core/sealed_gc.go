@@ -91,6 +91,7 @@ func openSealedPartGC(db *pebble.DB, dir string, stage func(string)) (*sealedPar
 	if err != nil {
 		return nil, err
 	}
+	repaired := false
 	for _, entry := range entries {
 		name := strings.TrimSuffix(entry.Name(), ".descriptor")
 		if entry.IsDir() || !strings.HasSuffix(name, ".sst") {
@@ -102,8 +103,17 @@ func openSealedPartGC(db *pebble.DB, dir string, stage func(string)) (*sealedPar
 		}
 		var id v2part.Digest
 		copy(id[:], raw)
-		_, closer, e := db.Get(partBinding(sealedPartPrefix, id))
+		value, closer, e := db.Get(partBinding(sealedPartPrefix, id))
 		if e == nil {
+			// Seals do not sync sidecars: restore any a crash left short.
+			if name == entry.Name() {
+				fixed, e := repairSidecar(filepath.Join(g.dir, name+".descriptor"), value)
+				repaired = repaired || fixed
+				if e != nil {
+					_ = closer.Close()
+					return nil, e
+				}
+			}
 			_ = closer.Close()
 			continue
 		}
@@ -111,6 +121,11 @@ func openSealedPartGC(db *pebble.DB, dir string, stage func(string)) (*sealedPar
 			return nil, e
 		}
 		g.pending[id] = retiredPart{at: g.now()}
+	}
+	if repaired {
+		if err = SyncPartDirectory(g.dir); err != nil {
+			return nil, err
+		}
 	}
 	g.pendingCount.Store(uint64(len(g.pending)))
 	return g, nil

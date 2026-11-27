@@ -5,6 +5,10 @@ import "github.com/cockroachdb/pebble/vfs"
 // Owner databases persist small metadata updates. Pebble otherwise reserves
 // 110% of the memtable limit for each WAL, regardless of the bytes written.
 // Suppress that optional reservation without changing memtables or durability.
+// ownerFS holds owner Pebble stores, staged seal SSTs and part directories.
+// Tests wrap it to count durable syncs per seal.
+var ownerFS vfs.FS = vfs.Default
+
 type ownerMetadataFS struct{ vfs.FS }
 
 type ownerMetadataFile struct{ vfs.File }

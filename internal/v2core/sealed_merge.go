@@ -995,6 +995,9 @@ func (o *coreOwner) mergeSealedParts(stop <-chan struct{}, full bool) (bool, err
 // fileMu already excludes unlink, so publications wait only for the commit.
 func (g *sealedPartGC) replaceMerged(inputs []v2part.Descriptor, path string, d v2part.Descriptor, moveEpoch uint64) (bool, error) {
 	added, _, err := retainSealedPart(filepath.Dir(g.dir), path, d)
+	if err == nil {
+		err = syncRetainedParts(filepath.Dir(g.dir))
+	}
 	if err != nil {
 		return false, err
 	}

@@ -145,7 +145,7 @@ func LinkPartSnapshot(ctx context.Context, dir string, reader PartSnapshotReader
 
 // SyncPartDirectory makes renamed files durable before publishing completion.
 func SyncPartDirectory(dir string) error {
-	f, err := os.Open(dir)
+	f, err := ownerFS.OpenDir(dir)
 	if err != nil {
 		return err
 	}

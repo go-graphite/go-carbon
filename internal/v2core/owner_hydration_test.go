@@ -144,7 +144,7 @@ func TestOwnerHydrationSIGKILL(t *testing.T) {
 		var wg sync.WaitGroup
 		errs := make(chan error, 8)
 		for range 8 {
-			wg.Go(func() { errs <- o.gc.inventory.AwaitHydration(context.Background()) })
+			wg.Go(func() { errs <- gcInventory(o).AwaitHydration(context.Background()) })
 		}
 		wg.Wait()
 		close(errs)
@@ -236,7 +236,7 @@ func TestOwnerHydrationPacesMaintenance(t *testing.T) {
 	}
 	done := make(chan error, cfg.Shards)
 	for _, o := range e.owners {
-		go func() { done <- o.gc.inventory.AwaitHydration(context.Background()) }()
+		go func() { done <- gcInventory(o).AwaitHydration(context.Background()) }()
 	}
 	for i := 1; i < cfg.Shards; i++ {
 		select {
@@ -256,4 +256,11 @@ func TestOwnerHydrationPacesMaintenance(t *testing.T) {
 			t.Fatalf("owner %d hydrated %d identities", i, len(o.rollups.ids))
 		}
 	}
+}
+
+// gcInventory reads the owner's inventory under gc.mu, as seals replace it.
+func gcInventory(o *coreOwner) *RollupInventory {
+	o.gc.mu.Lock()
+	defer o.gc.mu.Unlock()
+	return o.gc.inventory
 }

@@ -82,6 +82,9 @@ func openPartSource(root, journal string, source v2part.Provenance) (v2part.Prov
 	return source, err
 }
 
+// retainSealedPart links a synced part into dir/parts and writes its sidecar.
+// The caller syncs dir/parts once (syncRetainedParts) before it binds any
+// returned descriptor; the owner open made the parts/ entry itself durable.
 func retainSealedPart(dir, path string, d v2part.Descriptor) (coreKV, []string, error) {
 	var saved []string
 	b, err := d.MarshalBinary()
@@ -110,44 +113,41 @@ func retainSealedPart(dir, path string, d v2part.Descriptor) (coreKV, []string, 
 	} else {
 		saved = append(saved, target)
 	}
+	// The sidecar is a copy of the binding value, not a durability step: the
+	// owner open rewrites any bound part's sidecar that a crash left short.
 	sidecar := target + ".descriptor"
-	f, err := os.OpenFile(sidecar, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if errors.Is(err, os.ErrExist) {
-		old, e := os.ReadFile(sidecar)
-		if e != nil {
-			return coreKV{}, saved, e
+	// A matching one can outlive an interrupted data-link deletion and is
+	// reused; an unbound leftover (a crash before publication) is rewritten.
+	if old, e := os.ReadFile(sidecar); e != nil || !bytes.Equal(old, b) {
+		if errors.Is(e, os.ErrNotExist) {
+			saved = append(saved, sidecar)
 		}
-		if !bytes.Equal(old, b) {
-			return coreKV{}, saved, errors.New("existing descriptor mismatch")
+		if err = writeSidecar(sidecar, b, false); err != nil {
+			return coreKV{}, saved, err
 		}
-		// The sidecar can outlive an interrupted data-link deletion. A
-		// newly recreated link still needs directory durability before binding.
-		if e = SyncPartDirectory(parts); e != nil {
-			return coreKV{}, saved, e
-		}
-		if e = SyncPartDirectory(dir); e != nil {
-			return coreKV{}, saved, e
-		}
-		key := append(bytes.Clone(sealedPartPrefix), d.SHA256[:]...)
-		return coreKV{Key: key, Value: b}, saved, nil
-	}
-	if err != nil {
-		return coreKV{}, saved, err
-	}
-	saved = append(saved, sidecar)
-	_, err = f.Write(b)
-	if err == nil {
-		err = f.Sync()
-	}
-	err = errors.Join(err, f.Close())
-	if err == nil {
-		err = SyncPartDirectory(parts)
-	}
-	if err == nil {
-		err = SyncPartDirectory(dir)
 	}
 	key := append(bytes.Clone(sealedPartPrefix), d.SHA256[:]...)
-	return coreKV{Key: key, Value: b}, saved, err
+	return coreKV{Key: key, Value: b}, saved, nil
+}
+
+// repairSidecar rewrites path to want, synced, unless it already matches.
+func repairSidecar(path string, want []byte) (bool, error) {
+	if b, err := os.ReadFile(path); err == nil && bytes.Equal(b, want) {
+		return false, nil
+	}
+	return true, writeSidecar(path, want, true)
+}
+
+func writeSidecar(path string, b []byte, sync bool) error {
+	f, err := ownerFS.Create(path)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(b)
+	if err == nil && sync {
+		err = f.Sync()
+	}
+	return errors.Join(err, f.Close())
 }
 
 // SealedSnapshotReader enumerates original part bytes bound to one immutable
@@ -194,4 +194,10 @@ func (r SealedSnapshotReader) ReadPartFiles(ctx context.Context) ([]SnapshotPart
 		out = append(out, SnapshotPart{Path: path + ".descriptor", ID: did, SHA256: did, Bytes: int64(len(it.Value()))})
 	}
 	return out, it.Error()
+}
+
+// syncRetainedParts makes every link retained in dir/parts durable with one
+// directory sync, before the caller publishes their descriptors.
+func syncRetainedParts(dir string) error {
+	return SyncPartDirectory(filepath.Join(dir, "parts"))
 }
