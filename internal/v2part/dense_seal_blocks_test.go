@@ -93,7 +93,7 @@ func TestDenseSealBlocksReadAsRest(t *testing.T) {
 	if !bytes.Equal(streams[0], streams[1]) {
 		t.Fatal("seal block layout changed the logical record stream")
 	}
-	if blocks[1] < 3*blocks[0] {
+	if blocks[1] < 6*blocks[0] {
 		t.Fatalf("seal part has %d data blocks, rest part %d: seal blocks are not small", blocks[1], blocks[0])
 	}
 }

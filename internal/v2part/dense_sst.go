@@ -16,11 +16,12 @@ import (
 
 // denseBlockSize bounds a block before compression. Seal parts use
 // denseSealBlockSize: every render seeks each live part once per name, and a
-// block-cache miss decompresses a whole block, so young parts keep small
-// blocks while merges rewrite them into large ones. Readers take any size.
+// block-cache miss decompresses and allocates a whole block, so young parts
+// keep small blocks while merges rewrite them into large ones. A miss costs
+// about 46 us at 64 KiB and scales with the block size. Readers take any size.
 const (
 	denseBlockSize     = 256 << 10
-	denseSealBlockSize = 64 << 10
+	denseSealBlockSize = 32 << 10
 )
 
 var denseCRC = crc32.MakeTable(crc32.Castagnoli)

@@ -678,6 +678,10 @@ func (s *RollupSnapshot) eachPartRecord(ctx context.Context, name string, m *sna
 				return e
 			}
 			part.meta = compactMetadata(meta)
+			// A skip that tests part metadata can only decide once it is loaded.
+			if skip != nil && skip(part) {
+				return nil
+			}
 		}
 		if !s.recordVisible(m, origin, seq, part.meta.Frontier.Order) {
 			return nil
