@@ -1584,13 +1584,17 @@ func syncCompare(name, source string, src, dst syncSeries, step, from, until int
 
 func (s *syncer) summary(err error) {
 	residualNames := map[string]bool{}
-	points, pendingSelections := 0, 0
+	points, pendingSelections, openSelections := 0, 0, 0
 	var actual []syncResidual
 	var pending []syncResidual
 	for _, r := range s.sum.residual {
 		if r.Reason == syncWindowSelectionReason {
 			pendingSelections++
 			pending = append(pending, r)
+			// A quarantined selection is a named exception, not unfinished work.
+			if !s.o.issues.excluded(r.Name) {
+				openSelections++
+			}
 			continue
 		}
 		actual = append(actual, r)
@@ -1628,10 +1632,14 @@ func (s *syncer) summary(err error) {
 		_, fields["target_health_pause_seconds"] = live.health.snapshot()
 	}
 	fields["quarantined"], fields["policy_skipped"] = s.o.issues.counts()
+	if names := s.o.issues.names(shown); len(names) > 0 {
+		fields["quarantined_names"] = names
+		fields["quarantine_path"] = filepath.Join(s.o.issues.state, "quarantine.json")
+	}
 	if err != nil {
 		fields["error"] = err.Error()
 	}
-	if err == nil && s.sum.Residual == 0 && pendingSelections == 0 {
+	if err == nil && s.sum.Residual == 0 && openSelections == 0 {
 		fields["verdict"] = "COMPLETE"
 		if n, _ := s.o.issues.counts(); n > 0 {
 			fields["verdict"] = "COMPLETE_EXCEPT"

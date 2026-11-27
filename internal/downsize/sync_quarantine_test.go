@@ -150,7 +150,7 @@ func TestSyncIssueLedgerRecovery(t *testing.T) {
 	}
 }
 
-func TestSyncWindowSelectionStallIsTerminalOnResume(t *testing.T) {
+func TestSyncWindowSelectionStallQuarantinesAndResumeRetries(t *testing.T) {
 	t.Parallel()
 	state := t.TempDir()
 	q, err := openSyncIssues(state)
@@ -165,31 +165,73 @@ func TestSyncWindowSelectionStallIsTerminalOnResume(t *testing.T) {
 	if err = j.append(syncRow{Kind: "window-selected", Round: 1, Source: syncD1, Skipped: []syncSkip{{"pending", syncWindowSelectionReason}}, SelectionComplete: true}); err != nil {
 		t.Fatal(err)
 	}
+	// A state written by an older client that ended the run on this frontier.
+	if err = j.append(syncRow{Kind: "window-retry-terminal", Holes: []syncHole{{Name: "pending", Source: syncD1}}}); err != nil {
+		t.Fatal(err)
+	}
 	f := newFakeSync()
 	f.put(syncD1, "pending", syncTestSchema)
 	now := time.Unix(syncTestNow, 0)
 	s := &syncer{o: syncOptions{issues: q, to: syncT, from: []string{syncD1}, state: state, windows: syncRanges{{From: syncTestNow - 600, Until: syncTestNow - 120}}, includeShort: true, now: func() time.Time { return now }}, b: stalledSelectionBackend{f, &now}, j: j, forbid: map[string]bool{}}
-	if err = s.waitWindowSelections(context.Background()); !errors.Is(err, ErrSyncResidual) || errors.Is(err, ErrSyncQuarantined) {
+	if err = s.savedWindowSelectionFailure(); err != nil {
+		t.Fatal("old terminal stop still ends the run", err)
+	}
+	if err = s.waitWindowSelections(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if a, b := q.counts(); a != 0 || b != 0 || q.excluded("pending") || q.excluded("healthy") {
+	if a, b := q.counts(); a != 1 || b != 0 || !q.excluded("pending") || !s.hasPendingWindowSelections() {
 		t.Fatal(a, b)
-	}
-	// Resume retains the terminal frontier without any new backend attempt.
-	reopened, err := openSyncIssues(state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s.o.issues = reopened
-	before := now
-	if err = s.waitWindowSelections(context.Background()); !errors.Is(err, ErrSyncResidual) || errors.Is(err, ErrSyncQuarantined) {
-		t.Fatal(err)
-	}
-	if !now.Equal(before) {
-		t.Fatal("resume retried quarantined selection")
 	}
 	if len(j.find(func(r syncRow) bool { return r.Kind == "window-resolved" })) != 0 {
 		t.Fatal("quarantine manufactured a resolution")
+	}
+	if err = q.checkpoint(); err != nil {
+		t.Fatal(err)
+	}
+	// Resume retries the quarantined selection on a fresh pin.
+	reopened, err := openSyncIssues(state)
+	if err != nil || !reopened.excluded("pending") {
+		t.Fatal("quarantine lost on resume", err)
+	}
+	s.o.issues = reopened
+	before := now
+	if err = s.waitWindowSelections(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if now.Equal(before) {
+		t.Fatal("resume did not retry quarantined selection")
+	}
+	if !reopened.excluded("pending") {
+		t.Fatal("unresolved selection released")
+	}
+}
+
+func TestSyncSelectionQuarantineReleaseSurvivesReplay(t *testing.T) {
+	t.Parallel()
+	state := t.TempDir()
+	q, err := openSyncIssues(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = q.record([]syncResidual{{syncHole: syncHole{Name: "pending"}, Reason: syncWindowSelectionReason}, {syncHole: syncHole{Name: "broken"}, Reason: "copy_failed"}}, "window retry", false); err != nil {
+		t.Fatal(err)
+	}
+	if err = q.releaseSelections([]string{"pending", "broken"}); err != nil {
+		t.Fatal(err)
+	}
+	if q.excluded("pending") || !q.excluded("broken") {
+		t.Fatal("release touched the wrong names", q.quarantined)
+	}
+	replayed, err := openSyncIssues(state)
+	if err != nil || replayed.excluded("pending") || !replayed.excluded("broken") {
+		t.Fatal("journal replay lost the release", err)
+	}
+	if err = replayed.checkpoint(); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := openSyncIssues(state)
+	if a, _ := snap.counts(); err != nil || a != 1 || snap.excluded("pending") {
+		t.Fatal("checkpoint kept a released name", err)
 	}
 }
 

@@ -2,7 +2,6 @@ package downsize
 
 import (
 	"context"
-	"errors"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -64,10 +63,11 @@ func TestWindowSelectionSelfMetricsAreNotPrefixExcluded(t *testing.T) {
 			for _, name := range names {
 				s.addResidual(syncHole{Name: name, Source: syncD1}, syncWindowSelectionReason)
 			}
-			if err := s.waitWindowSelections(context.Background()); !errors.Is(err, ErrSyncResidual) {
+			// A rejected repair quarantines only its own name; the run continues.
+			if err := s.waitWindowSelections(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			if n, _ := q.counts(); n != 0 || q.excluded(failed) {
+			if n, _ := q.counts(); n != 1 || !q.excluded(failed) {
 				t.Fatalf("wrong failed-name quarantine: %+v", q.quarantined)
 			}
 			want := map[string]bool{names[1]: true, names[2]: true}
@@ -79,9 +79,20 @@ func TestWindowSelectionSelfMetricsAreNotPrefixExcluded(t *testing.T) {
 					t.Fatal("healthy self metric was not repaired", name)
 				}
 			}
+			// A resume retries only the quarantined name and releases it once it
+			// repairs; completed selections are never copied again.
 			copies := len(b.copies)
-			if err := s.waitWindowSelections(context.Background()); !errors.Is(err, ErrSyncResidual) || len(b.copies) != copies {
-				t.Fatal("replayed completed or quarantined selection", err)
+			b.failed = ""
+			if err := s.waitWindowSelections(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			for _, c := range b.copies[copies:] {
+				if c != syncD1+" "+failed {
+					t.Fatal("replayed completed selection", b.copies[copies:])
+				}
+			}
+			if n, _ := q.counts(); n != 0 || len(b.copies) == copies || b.store(syncT).points[failed][60][w.From] != 42 {
+				t.Fatalf("quarantined selection was not retried: %+v %v", q.quarantined, b.copies[copies:])
 			}
 		})
 	}

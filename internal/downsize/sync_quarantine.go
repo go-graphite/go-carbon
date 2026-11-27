@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,6 +27,9 @@ type syncIssue struct {
 	Phase     string    `json:"phase"`
 	FirstSeen time.Time `json:"first_seen"`
 	LastSeen  time.Time `json:"last_seen"`
+	// Released is journal-only: a later observation resolved the name, so a
+	// resume or checkpoint drops it. Snapshots never contain released rows.
+	Released bool `json:"released,omitempty"`
 }
 type syncIssues struct {
 	mu                  sync.Mutex
@@ -80,6 +84,40 @@ func (q *syncIssues) excluded(name string) bool {
 	return a || b
 }
 
+// retryableSelection reports whether an unresolved source window selection may
+// be selected again. Selection quarantine is retried on resume (the source
+// snapshot may have landed); policy and other quarantine reasons are not.
+func (q *syncIssues) retryableSelection(name string) bool {
+	if q == nil {
+		return true
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if _, ok := q.policy[name]; ok {
+		return false
+	}
+	v, ok := q.quarantined[name]
+	return !ok || v.Reason == syncWindowSelectionReason
+}
+
+// names returns up to limit quarantined names in name order, for reports.
+func (q *syncIssues) names(limit int) []string {
+	if q == nil {
+		return nil
+	}
+	q.mu.Lock()
+	out := make([]string, 0, len(q.quarantined))
+	for n := range q.quarantined {
+		out = append(out, n)
+	}
+	q.mu.Unlock()
+	sort.Strings(out)
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
 // Policy exclusions are explicit eligibility decisions, not unknown coverage.
 func (q *syncIssues) policyExcluded(name string) bool {
 	if q == nil {
@@ -122,12 +160,26 @@ func (q *syncIssues) record(rows []syncResidual, phase string, policy bool) erro
 	for _, v := range updates {
 		delta = append(delta, v)
 	}
+	if err := q.appendLocked(file, delta); err != nil {
+		return err
+	}
+	for name, v := range updates {
+		dst[name] = v
+	}
+	for _, r := range added {
+		event("sync_name_quarantined", map[string]any{"level": "ERROR", "metric": r.Name, "reason": r.Reason, "phase": r.Phase, "policy_skipped": policy, "path": filepath.Join(q.state, file)})
+	}
+	return nil
+}
+
+// appendLocked durably appends one delta before any phase cursor may
+// acknowledge it. Only the delta is written, independent of ledger size.
+// Caller holds q.mu.
+func (q *syncIssues) appendLocked(file string, delta []syncIssue) error {
 	data, err := json.Marshal(delta)
 	if err != nil {
 		return err
 	}
-	// A successful record is durable before any phase cursor may acknowledge
-	// these exclusions. Only the delta is written, independent of ledger size.
 	f, err := os.OpenFile(filepath.Join(q.state, file+".jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return err
@@ -142,12 +194,40 @@ func (q *syncIssues) record(rows []syncResidual, phase string, policy bool) erro
 		q.failure = err
 		return err
 	}
-	for name, v := range updates {
-		dst[name] = v
-	}
 	q.dirty[file] = true
-	for _, r := range added {
-		event("sync_name_quarantined", map[string]any{"level": "ERROR", "metric": r.Name, "reason": r.Reason, "phase": r.Phase, "policy_skipped": policy, "path": filepath.Join(q.state, file)})
+	return nil
+}
+
+// releaseSelections drops selection quarantine for names whose source window
+// selection has since resolved. Other quarantine reasons are kept.
+func (q *syncIssues) releaseSelections(names []string) error {
+	if q == nil || len(names) == 0 {
+		return nil
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.failure != nil {
+		return q.failure
+	}
+	now := time.Now()
+	var delta []syncIssue
+	for _, n := range names {
+		v, ok := q.quarantined[n]
+		if !ok || v.Reason != syncWindowSelectionReason {
+			continue
+		}
+		v.LastSeen, v.Released = now, true
+		delta = append(delta, v)
+	}
+	if len(delta) == 0 {
+		return nil
+	}
+	if err := q.appendLocked("quarantine.json", delta); err != nil {
+		return err
+	}
+	for _, v := range delta {
+		delete(q.quarantined, v.Name)
+		event("sync_name_released", map[string]any{"metric": v.Name, "reason": v.Reason, "phase": v.Phase, "path": filepath.Join(q.state, "quarantine.json")})
 	}
 	return nil
 }
@@ -188,6 +268,10 @@ func (q *syncIssues) replay(file string, dst map[string]syncIssue) error {
 				return fmt.Errorf("invalid issue in %s journal", file)
 			}
 			if prev, ok := dst[v.Name]; !ok || !v.LastSeen.Before(prev.LastSeen) {
+				if v.Released {
+					delete(dst, v.Name)
+					continue
+				}
 				dst[v.Name] = v
 			}
 		}
@@ -232,7 +316,9 @@ func (s *syncer) excludePolicy(name, phase string) (bool, error) {
 	if s.o.issues == nil {
 		return false, nil
 	}
-	if s.o.issues.excluded(name) {
+	// A selection retry repairs its own quarantined name; any other phase
+	// keeps skipping it until that retry resolves and releases the name.
+	if s.o.issues.excluded(name) && !(strings.HasPrefix(phase, "window-retry-") && s.o.issues.retryableSelection(name)) {
 		return true, nil
 	}
 	if len(name) <= chunkstore.MaxMetricNameBytes {

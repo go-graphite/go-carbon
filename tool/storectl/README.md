@@ -891,7 +891,7 @@ The saved configuration fixes the full-history/window-only scope, windows,
 verification batches and settle cutoff. Changed donor, target, ownership or window
 inputs select a named child scope as described under resume above.
 
-A catalogued source name whose native snapshot omits retention metadata is unresolved (for example, pending writer state). Window selection records that name as an unresolved residual and continues copying healthy peers in the batch. Skipped selections are retried on fresh native pins when resuming and again after the missing-name scan. Only a complete window selection, followed by a successful window-only copy when points exist, writes a durable resolution. Original selection and native copy intents stay unchanged. Unresolved source coverage still prevents a successful exit even if another replica or serving-archive verification finds no holes; it is never treated as empty history.
+A catalogued source name whose native snapshot omits retention metadata is unresolved (for example, pending writer state). Window selection records that name as an unresolved residual and continues copying healthy peers in the batch. Skipped selections are retried on fresh native pins when resuming and again after the missing-name scan. Only a complete window selection, followed by a successful window-only copy when points exist, writes a durable resolution. Original selection and native copy intents stay unchanged. If a selection makes no progress for 2 minutes, or its repair copy is rejected, its names are recorded in `quarantine.json` with the reason `source window selection unresolved: missing metadata or pending snapshot`, and the run continues through verify and fill. `sync_done` lists them in `quarantined_names` and the verdict is `COMPLETE_EXCEPT`/`READY_EXCEPT`, never a clean success: unresolved source coverage is never treated as empty history. Every `--resume` retries these selections; a name that now resolves is copied and released from `quarantine.json`. Read-only (`--no-copy`) runs still stop on a pending selection. States written by older clients that stopped on such names resume the same way.
 
 ### Durable discovery and progress snapshots
 
@@ -1064,7 +1064,8 @@ count. `sync_round.holes` separately retains archive/window hole observations.
 `policy-skipped.json`. These names never reach copy, verification or READY reads
 and do not prevent READY. Names still unresolved after the existing bounded
 selection or repair retries are recorded in `quarantine.json`; the remaining
-names continue through every phase. Both files contain the name, reason, phase,
+names continue through every phase. Unresolved window selections are the one
+quarantine reason that `--resume` retries; they leave the list once resolved. Both files contain the name, reason, phase,
 and first/last observation time and survive `--resume`. Recovery jobs share their
 parent's lists, preserving the original journals and immutable copy selections.
 

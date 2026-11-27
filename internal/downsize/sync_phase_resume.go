@@ -475,7 +475,7 @@ func (s *syncer) hasPendingWindowSelections() bool {
 			continue
 		}
 		for _, skip := range r.Skipped {
-			if !resolved[syncWindowSelectionKey{r.Round, r.Source}][skip.Name] && !s.o.issues.excluded(skip.Name) {
+			if !resolved[syncWindowSelectionKey{r.Round, r.Source}][skip.Name] && s.o.issues.retryableSelection(skip.Name) {
 				return true
 			}
 		}
