@@ -1180,3 +1180,40 @@ Reset changes only proof history, not points, receipts or lineage. No rollback i
 needed; the next verification registers fresh scopes. See
 [window mutation proofs](../../doc/window-mutation-proofs.md#explicit-retirement)
 for the per-name API, fencing protocol and counters.
+
+## Whole-store clone
+
+`storectl clone` copies a whole Pebble store as raw files into an empty
+directory on another host, for fixtures and rehearsals. File numbers and
+metric IDs stay as they are, so raw tables are valid there; merging into a
+live store still uses the re-keyed native transfer.
+
+```
+target$ storectl clone recv -listen :18431 -dir /data/clone/v1
+source$ sudo nice -n 10 storectl clone send -source /var/lib/carbon/store/shared \
+          -staging /var/lib/carbon/clone-staging -to target:18431 -streams 16 \
+          -cache-metrics http://localhost:7007/metrics
+target$ storectl clone verify -dir /data/clone/v1
+```
+
+- `send` never writes the store directory and needs no daemon change. It
+  hard-links every table into a new staging directory on the same
+  filesystem, copies the current manifest up to its last complete record,
+  and links any table that manifest names but the first pass missed. When a
+  named table was compacted away meanwhile, it copies a newer manifest and
+  repeats. WAL files are skipped: the clone is the last flushed state.
+- It streams only the live tables plus the small metadata files over N TCP
+  connections with a SHA-256 per file, and removes the staging directory on
+  exit, error or SIGTERM. It pauses while the source cache is at or above
+  `-pause-at` of its limit or its overflow-drop counter rises, resumes below
+  `-resume-at`, and aborts below `-abort-free` free space on the staging
+  filesystem, because the links keep compacted tables alive.
+- `recv` refuses to overwrite files, checks size and SHA-256 per file, syncs
+  each file and the directory, and writes `CLONE-FILES.json` once the
+  sender's list matches what arrived.
+- `verify` opens the clone read-only, checks that every live table exists at
+  its recorded size, and validates every block checksum in parallel.
+- `send -raw DIR` streams a plain directory as it is (network probes).
+- A store with an incremental-migration binding keeps its recorded source
+  path; rewrite that line to the clone's own empty original directory before
+  starting a daemon on it.
