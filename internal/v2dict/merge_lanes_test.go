@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -149,6 +150,78 @@ func TestMergeLanesBoundLevels(t *testing.T) {
 		t.Fatal(err)
 	}
 	d, err := Open(dir, Options{NoMerge: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	checkIDs(t, d, ids)
+}
+
+// Producers admitting first-sight names in separate shards write levels
+// through size-triggered flushes (shard-local logs, no store-wide lock).
+// While the first merge (the base merge) blocks one lane, the other keeps
+// those levels merged: after the producers, at most 12 levels remain (with
+// one merge at a time every flushed level waits), and no name is lost.
+func TestMergeLanesBoundConcurrentAdmission(t *testing.T) {
+	dir := t.TempDir()
+	d, err := Open(dir, Options{BufferBytes: 8 << 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]uint32{}
+	for i := range 400 {
+		name := fmt.Sprintf("base.%05d", i)
+		e, _, err := d.Append("g", uint16(i%7), []byte(name), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids[name] = e.ID
+	}
+	if err := d.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.MergeAll(); err != nil {
+		t.Fatal(err)
+	}
+	started, release := hookMerges(t, []int{0}, -1)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for g := range 7 { // producer g owns vshard g: n%7 == g
+		wg.Go(func() {
+			for i := range 600 {
+				name := fmt.Sprintf("c.%05d", i*7+g)
+				e, _, err := d.Append("g", uint16(g), []byte(name), 0)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				mu.Lock()
+				ids[name] = e.ID
+				mu.Unlock()
+			}
+		})
+	}
+	waitClosed(t, "first merge", started[0])
+	wg.Wait()
+	if t.Failed() {
+		t.FailNow()
+	}
+	if err := d.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	// The blocked merge holds one lane; wait for the other to finish.
+	waitFor(t, "second lane", func() bool { return busyMergers(d) == 1 })
+	if n := len(d.snap.Load().levels); n > 12 {
+		t.Fatalf("%d levels behind a running merge, want <= 12", n)
+	} else {
+		t.Logf("%d levels behind the blocked merge", n)
+	}
+	checkIDs(t, d, ids)
+	close(release[0])
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	d, err = Open(dir, Options{NoMerge: true})
 	if err != nil {
 		t.Fatal(err)
 	}
