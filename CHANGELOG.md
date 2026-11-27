@@ -1,6 +1,8 @@
 ## Changelog
 ##### master
 
+* buckyd: `POST /v1/delete` deletes up to 512 metrics in one atomic commit and
+  backs off with HTTP 429 under transfer pressure. See [shared storage](doc/shared-storage.md).
 * Add compact binary stream input autodetected on the plaintext TCP port, a public
   relay codec with optional zstd, bounded dictionary resets, restart state handoff,
   and per-ID sink slots. See [stream input](doc/stream-input.md).

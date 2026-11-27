@@ -307,6 +307,25 @@ func (s *Store) DeleteIfUnchanged(ctx context.Context, name string, expected Met
 	return s.deleteMetric(ctx, name, &expected)
 }
 
+// DeleteMetricsIfUnchanged is the administrative form of DeleteBatchIfUnchanged:
+// up to 512 metrics leave in one atomic commit, as expiration deletes them.
+// Like Delete, it refuses a read-only store and invalidates cached reads once
+// a metric was removed. Results follow input order: nil, ErrNotFound or
+// ErrConflict for a changed metric, which stays untouched.
+func (s *Store) DeleteMetricsIfUnchanged(ctx context.Context, expected []Metadata) ([]error, error) {
+	if s.readOnly {
+		return nil, ErrReadOnly
+	}
+	results, err := s.deleteBatchIfUnchanged(ctx, expected, nil)
+	if err != nil {
+		return nil, err
+	}
+	if slices.Contains(results, error(nil)) {
+		s.invalidateReadCache()
+	}
+	return results, nil
+}
+
 // InitializeActivity assigns an activity time to a legacy metric whose
 // revision record predates activity tracking. It only mutates the exact
 // revision observed by the caller, so an expiration scan cannot race a write.
