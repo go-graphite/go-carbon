@@ -3,9 +3,11 @@ package v2daemon
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/go-graphite/go-carbon/internal/namefp"
 	"github.com/go-graphite/go-carbon/internal/v2recv"
@@ -45,6 +47,15 @@ func checkNameLimits(name string) error {
 
 const maxFileNameBytes = 255 // NAME_MAX on Linux filesystems
 
+// FutureTimestampError refuses one point stamped more than Config.FutureLimit
+// after its batch's admission clock. Like VictoriaMetrics, v2 keeps no ring:
+// a point it accepts stays, so far-future garbage would stay forever.
+type FutureTimestampError struct{ Timestamp, Clock int64 }
+
+func (e *FutureTimestampError) Error() string {
+	return fmt.Sprintf("timestamp %d is beyond the future limit (admission clock %d)", e.Timestamp, e.Clock)
+}
+
 // applicationOwner maps a name to its producer-local catalog ID with one
 // namefp.Table probe keyed by the name's 96-bit fingerprint. No name bytes are
 // read or kept. A miss checks the producer catalog first; only a name absent
@@ -54,6 +65,7 @@ type applicationOwner struct {
 	resolve  PolicyResolver
 	throttle func(*points.Points, bool) bool
 	reject   func(name string, err error) // one refused point; nil ignores
+	future   int64                        // seconds a point may lead its batch clock; 0 = no limit
 	names    namefp.Table                 // fingerprint → producer-local catalog ID
 	apps     []Application
 	sequence []uint64
@@ -120,6 +132,10 @@ func (o *applicationOwner) appendNames(names []string, text []byte, ends []int, 
 	var previous namefp.Fingerprint
 	var local uint32 // 0 until the first admitted name: catalog IDs start at 1
 	start := 0
+	latest := int64(math.MaxInt64)
+	if o.future > 0 {
+		latest = clock + o.future
+	}
 	for i := range data {
 		var name string
 		var raw []byte
@@ -128,6 +144,15 @@ func (o *applicationOwner) appendNames(names []string, text []byte, ends []int, 
 			start = ends[i]
 		} else {
 			name = names[i]
+		}
+		if data[i].Timestamp > latest {
+			if o.reject != nil {
+				if ends != nil {
+					name = string(raw)
+				}
+				o.reject(name, &FutureTimestampError{Timestamp: data[i].Timestamp, Clock: clock})
+			}
+			continue
 		}
 		var route uint64
 		switch {
@@ -220,7 +245,7 @@ func (s *Store) ReceiveApplicationsTCPWithAdmission(l net.Listener, cfg v2recv.C
 	}
 	owners := make([]v2recv.Owner, len(s.Producers))
 	for i, p := range s.Producers {
-		owners[i] = &applicationOwner{p: p, resolve: resolve, throttle: throttle, reject: reject}
+		owners[i] = &applicationOwner{p: p, resolve: resolve, throttle: throttle, reject: reject, future: int64(s.cfg.FutureLimit / time.Second)}
 	}
 	return v2recv.Start(l, owners, cfg)
 }

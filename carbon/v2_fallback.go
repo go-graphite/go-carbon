@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-graphite/go-carbon/cache"
+	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/internal/v2core"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/prometheus/client_golang/prometheus"
@@ -142,6 +143,7 @@ type v2ModeMetrics struct {
 	mode          string
 	mirrored      atomic.Uint64
 	rejectedNames atomic.Uint64
+	futureDropped atomic.Uint64
 	unregister    func()
 }
 
@@ -149,10 +151,19 @@ var v2ModeDesc = prometheus.NewDesc("go_carbon_storage_mode", "Active storage mo
 var v2MirroredDesc = prometheus.NewDesc("go_carbon_classic_mirrored_points_total", "Points v2 intake submitted to classic.", nil, nil)
 var v2RejectedNamesDesc = prometheus.NewDesc("v2_name_rejected_points_total", "Points refused at v2 intake because their name has no valid policy (for example no schema or a classic policy mismatch). Over-long names are in receiver_name_too_long_rejected_points_total.", nil, nil)
 
+var v2FutureDroppedDesc = prometheus.NewDesc("v2_future_dropped_points_total", "Points dropped at v2 intake because their timestamp is more than v2.future-limit ahead of the receive time.", nil, nil)
+
+// Stat reports intake refusals (running totals) to the stats collector.
+func (m *v2ModeMetrics) Stat(send helper.StatCallback) {
+	send("futureDroppedPoints", float64(m.futureDropped.Load()))
+	send("nameRejectedPoints", float64(m.rejectedNames.Load()))
+}
+
 func (m *v2ModeMetrics) Describe(ch chan<- *prometheus.Desc) {
 	ch <- v2ModeDesc
 	ch <- v2MirroredDesc
 	ch <- v2RejectedNamesDesc
+	ch <- v2FutureDroppedDesc
 }
 func (m *v2ModeMetrics) Collect(ch chan<- prometheus.Metric) {
 	for _, mode := range []string{v2Shadow, v2ServingDual, v2Only} {
@@ -164,4 +175,5 @@ func (m *v2ModeMetrics) Collect(ch chan<- prometheus.Metric) {
 	}
 	ch <- prometheus.MustNewConstMetric(v2MirroredDesc, prometheus.CounterValue, float64(m.mirrored.Load()))
 	ch <- prometheus.MustNewConstMetric(v2RejectedNamesDesc, prometheus.CounterValue, float64(m.rejectedNames.Load()))
+	ch <- prometheus.MustNewConstMetric(v2FutureDroppedDesc, prometheus.CounterValue, float64(m.futureDropped.Load()))
 }

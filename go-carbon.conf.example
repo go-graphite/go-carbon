@@ -1547,6 +1547,11 @@ seal-interval = "10s"
 # would on disk. Set an absolute directory to move them elsewhere.
 l0-dir = ""
 seal-max-rows = 131072
+# Points stamped more than this ahead of their receive time are dropped and
+# counted (v2_future_dropped_points_total, one warning a minute with a sample
+# name and timestamp). v2 keeps every point it accepts; Whisper's ring would
+# let a future point overwrite an older one. "0s" keeps every timestamp.
+future-limit = "48h"
 read-budget-bytes = 268435456
 # Seals key parts by a vshard-local ID from the store name dictionary
 # (<path>/<core>/dict) instead of the metric name, by default. Set false to

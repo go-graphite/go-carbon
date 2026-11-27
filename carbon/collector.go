@@ -110,6 +110,7 @@ func NewCollector(app *App) *Collector {
 	}
 	if app.v2 != nil {
 		c.stats = append(c.stats, moduleCallback("v2.catalog", &app.v2.catalog))
+		c.stats = append(c.stats, moduleCallback("v2.intake", app.v2.metrics))
 	}
 	if app.SocketStats != nil {
 		c.stats = append(c.stats, moduleCallback("tcp", app.SocketStats))

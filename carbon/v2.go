@@ -35,6 +35,8 @@ type v2Config struct {
 	BaselinePath string    `toml:"baseline-path"`
 	SealInterval *Duration `toml:"seal-interval"`
 	SealMaxRows  int       `toml:"seal-max-rows"`
+	// FutureLimit refuses points stamped further ahead than this; 0 keeps all.
+	FutureLimit *Duration `toml:"future-limit"`
 
 	Enabled bool   `toml:"enabled"`
 	Mode    string `toml:"mode"`
@@ -212,6 +214,9 @@ func (app *App) startV2() error {
 	// publication. With no fsync to batch, producers hand rows to core every
 	// 100 ms, so the kill-loss window is about one publication.
 	storeConfig := v2daemon.Config{BaselinePath: c.V2.BaselinePath, Layer: 3, Producers: n, Shards: shards, GroupInterval: v2L0Drain, SealInterval: sealInterval, SealMaxRows: c.V2.SealMaxRows, L0Dir: l0Dir, Hooks: hooks}
+	if c.V2.FutureLimit != nil {
+		storeConfig.FutureLimit = c.V2.FutureLimit.Value()
+	}
 	storeConfig.Prepare = func() error {
 		if err := app.prepareV2Fallback(mode); err != nil {
 			return err
@@ -501,7 +506,7 @@ func (app *App) startV2() error {
 	return nil
 }
 
-var v2NameRejectLogged atomic.Int64
+var v2NameRejectLogged, v2FutureDropLogged atomic.Int64
 
 // rejectName counts one point refused by its name. Names classic cannot store
 // either (length or Whisper path limits, including ENAMETOOLONG from the
@@ -509,6 +514,19 @@ var v2NameRejectLogged atomic.Int64
 // per-name policy errors use v2_name_rejected_points_total. Intake continues;
 // the warning is logged at most once a minute, as classic does.
 func (v *v2Runtime) rejectName(core *cache.Cache, name string, err error) {
+	var future *v2daemon.FutureTimestampError
+	if errors.As(err, &future) {
+		v.metrics.futureDropped.Add(1)
+		now := time.Now().UnixNano()
+		last := v2FutureDropLogged.Load()
+		if now-last < int64(time.Minute) || !v2FutureDropLogged.CompareAndSwap(last, now) {
+			return
+		}
+		zapwriter.Logger("v2").Warn("dropped points beyond the future limit", zap.String("name_prefix", name[:min(len(name), 200)]),
+			zap.Int64("timestamp", future.Timestamp), zap.Int64("admission_clock", future.Clock),
+			zap.Uint64("future_dropped_points_total", v.metrics.futureDropped.Load()))
+		return
+	}
 	if errors.Is(err, v2daemon.ErrNameTooLong) || errors.Is(err, syscall.ENAMETOOLONG) {
 		core.AddNameTooLongRejected(1)
 	} else {
