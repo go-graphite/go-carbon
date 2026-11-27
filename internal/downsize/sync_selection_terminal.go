@@ -66,7 +66,12 @@ func (s *syncer) windowSelectionFailure(residuals []syncResidual, persist bool) 
 }
 
 // Check before discovery or checkpoint adoption as well as before a retry.
+// With a quarantine ledger, an older terminal stop is superseded: its names
+// are retried on fresh pins and quarantined again only if still unresolved.
 func (s *syncer) savedWindowSelectionFailure() error {
+	if s.o.issues != nil {
+		return nil
+	}
 	rows := s.j.find(func(r syncRow) bool { return r.Kind == "window-retry-terminal" })
 	if len(rows) == 0 {
 		return nil

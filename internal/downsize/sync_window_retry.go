@@ -101,10 +101,17 @@ func (s *syncer) waitWindowSelections(ctx context.Context) error {
 				pending++
 			}
 		}
+		if err := s.releaseResolvedSelections(); err != nil {
+			return err
+		}
 		if pending == 0 {
 			return nil
 		}
 		if s.windowRetryCopyError != nil {
+			if s.o.issues != nil && !s.o.noCopy {
+				event("sync_window_selection_quarantined", map[string]any{"level": "ERROR", "pending_selections": pending, "reason": syncWindowSelectionReason, "cause": s.windowRetryCopyError.Error()})
+				return s.quarantineWindowSelections()
+			}
 			return s.windowSelectionFailure(s.sum.residual, true)
 		}
 		if s.o.noCopy {
@@ -123,6 +130,11 @@ func (s *syncer) waitWindowSelections(ctx context.Context) error {
 			}
 			sort.Strings(frontier)
 			event("sync_window_selection_stalled", map[string]any{"pending_selections": pending, "frontier": frontier, "reason": syncWindowSelectionReason})
+			if s.o.issues != nil {
+				// Per-name quarantine: the rest of the run continues through
+				// verify and fill, reports the names, and a resume retries them.
+				return s.quarantineWindowSelections()
+			}
 			return s.windowSelectionFailure(s.sum.residual, true)
 		}
 		event("sync_window_selection_wait", map[string]any{"pending_selections": pending, "retry_seconds": delay.Seconds()})
@@ -130,6 +142,31 @@ func (s *syncer) waitWindowSelections(ctx context.Context) error {
 			return err
 		}
 	}
+}
+
+// releaseResolvedSelections drops selection quarantine for this journal's
+// skipped names that no longer have a pending selection after a retry.
+func (s *syncer) releaseResolvedSelections() error {
+	if s.o.issues == nil || s.j == nil || !s.windowOnly() {
+		return nil
+	}
+	pending := map[string]bool{}
+	for _, r := range s.sum.residual {
+		if r.Reason == syncWindowSelectionReason {
+			pending[r.Name] = true
+		}
+	}
+	seen := map[string]bool{}
+	var resolved []string
+	for _, r := range s.j.find(func(r syncRow) bool { return r.Kind == "window-selected" && len(r.Skipped) > 0 }) {
+		for _, skip := range r.Skipped {
+			if !seen[skip.Name] && !pending[skip.Name] {
+				seen[skip.Name] = true
+				resolved = append(resolved, skip.Name)
+			}
+		}
+	}
+	return s.o.issues.releaseSelections(resolved)
 }
 
 // Copy failures are provisional until verification has checked every donor.
@@ -349,7 +386,7 @@ func (s *syncer) retryWindowRows(ctx context.Context, rows []syncRow, resolved m
 		var names []string
 		seen := map[string]bool{}
 		for _, skip := range r.Skipped {
-			if !resolved[k][skip.Name] && !s.o.issues.excluded(skip.Name) && !seen[skip.Name] {
+			if !resolved[k][skip.Name] && s.o.issues.retryableSelection(skip.Name) && !seen[skip.Name] {
 				seen[skip.Name] = true
 				names = append(names, skip.Name)
 			}
