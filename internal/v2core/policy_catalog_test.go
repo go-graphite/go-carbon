@@ -134,7 +134,7 @@ func TestPolicyCatalogSharedSchemasAndPagedIDs(t *testing.T) {
 			t.Fatal("published handle changed")
 		}
 	}
-	for _, id := range []uint64{1023, 1024, 1025, ^uint64(0)} {
+	for _, id := range []uint64{1023, 1024, 1025, 1<<62 + 5} { // 2^63 and up is the packed space
 		name := fmt.Sprintf("page.metric.%d", id)
 		_, raw := rollupTestPolicy(t, name, "1s:1d", sealrollup.Last, .5)
 		h, err := c.intern(id, name, raw)
@@ -189,9 +189,11 @@ func TestIdentityValidationCost(t *testing.T) {
 	defer d.Close()
 	c := &PolicyCatalog{}
 	c.dict.Store(d)
-	for i, name := range []string{"identity." + strings.Repeat("metric.", 45), `identity.\"escaped`, "identity.<html>", "identity.é"} {
+	for _, name := range []string{"identity." + strings.Repeat("metric.", 45), `identity.\"escaped`, "identity.<html>", "identity.é"} {
 		_, raw := rollupTestPolicy(t, name, "1s:1h,1m:1d", sealrollup.Last, .5)
-		h, err := c.intern(uint64(i+1), name, raw)
+		// A dictionary store admits names under their packed ID; the
+		// neighbours share the name's dictionary block.
+		h, err := c.admit(name, raw)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -200,11 +202,6 @@ func TestIdentityValidationCost(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		e, _, err := d.Append(string(h.policy.Group), h.vshard, []byte(name), 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		h.rememberDictID(e.ID)
 		if err = d.Flush(); err != nil {
 			t.Fatal(err)
 		}

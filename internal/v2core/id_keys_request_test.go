@@ -33,8 +33,9 @@ func TestIDKeysRequestName(t *testing.T) {
 		if byID {
 			order = 2
 		}
-		rows := []row{{ID: 1, Time: 1700000000 + int64(order), Bits: math.Float64bits(float64(order)), Seq: order}}
-		err = e.submitBatches(0, []coreBatch{{ID: 1, Order: order, Clock: 1700000003, Policy: policy, Points: rows}}, order, true)
+		id := writerID(t, e.identities, 1, policy)
+		rows := []row{{ID: id, Time: 1700000000 + int64(order), Bits: math.Float64bits(float64(order)), Seq: order}}
+		err = e.submitBatches(0, []coreBatch{{ID: id, Order: order, Clock: 1700000003, Policy: policy, Points: rows}}, order, true)
 		if err != nil {
 			_ = e.close()
 			t.Fatal(err)

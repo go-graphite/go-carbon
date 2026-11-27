@@ -105,6 +105,9 @@ type Dict struct {
 	merging atomic.Bool
 	mergeMu sync.Mutex // one merge at a time
 	mergeWG sync.WaitGroup
+
+	pol policyTable // Entry.Policy -> immutable suffix (policy.go)
+	grp policyTable // packed-ID group index -> placement group label
 }
 
 // shard is one shard of the append level: the scopes whose vshard maps to
@@ -114,8 +117,11 @@ type shard struct {
 	buf     memtable
 	scopeIx map[string]int
 	nextID  []uint32
-	recs    []byte // log records of the current hold
+	recs    []byte // log records not yet in the log buffer
 	nrecs   uint32
+	// unlogged is set while recs holds records, so Sync visits only the
+	// shards that have some.
+	unlogged atomic.Bool
 }
 
 func shardIx(vshard uint16, n int) int { return int(vshard) % n }
@@ -237,8 +243,16 @@ func Open(dir string, opt Options) (*Dict, error) {
 			if d.log != nil {
 				_ = d.log.Close()
 			}
+			_ = d.pol.close()
+			_ = d.grp.close()
 		}
 	}()
+	if err := d.pol.open(dir, policyFile); err != nil {
+		return nil, err
+	}
+	if err := d.grp.open(dir, groupFile); err != nil {
+		return nil, err
+	}
 	for i := range d.shards {
 		d.shards[i].scopeIx = map[string]int{}
 	}
@@ -622,6 +636,32 @@ func (d *Dict) Delete(group string, vshard uint16, name []byte) (bool, error) {
 	return true, err
 }
 
+// SetPolicy records policy on the name's live entry when it has none: an
+// entry written before the policy table existed, whose policy only a retired
+// catalog knew. A recorded policy never changes. It reports whether it
+// changed the entry; the entry is durable after the next Sync.
+func (d *Dict) SetPolicy(group string, vshard uint16, name []byte, policy uint16) (bool, error) {
+	var ab [keyBuf]byte
+	key := append(scopeKey(ab[:0], group, vshard), name...)
+	sh := d.shard(vshard)
+	sh.mu.Lock()
+	if err := d.writableShared(); err != nil {
+		sh.mu.Unlock()
+		return false, err
+	}
+	e, ok := d.getLocked(sh, key)
+	if !ok || e.Deleted() || e.Policy != 0 || policy == 0 {
+		sh.mu.Unlock()
+		return false, nil
+	}
+	e.Policy = policy
+	d.put(sh, key, e)
+	err := d.commit(sh)
+	sh.mu.Unlock()
+	d.maybeFreeze()
+	return true, err
+}
+
 func (d *Dict) writable() error {
 	if d.closed {
 		return errors.New("v2dict: closed")
@@ -649,15 +689,33 @@ func (d *Dict) put(sh *shard, key []byte, e Entry) {
 	sh.nrecs++
 }
 
-// commit appends the hold's log records to the log, before the shard lock
-// is released, so a freeze (which holds every shard lock) finds every
-// record of the append level it freezes in the log it closes. The caller
-// holds sh.mu.
+// shardLogBytes bounds the log records a shard keeps between holds. Below
+// it a hold takes no store-wide lock, so producers admitting new names in
+// different shards never wait on each other; Sync and freeze log the rest.
+const shardLogBytes = 16 << 10
+
+// commit moves the shard's log records to the log buffer once they reach
+// shardLogBytes. The caller holds sh.mu.
 func (d *Dict) commit(sh *shard) error {
-	if sh.nrecs == 0 {
+	if len(sh.recs) < shardLogBytes {
+		if sh.nrecs > 0 && !sh.unlogged.Load() {
+			sh.unlogged.Store(true)
+		}
 		return nil
 	}
 	d.mu.Lock()
+	err := d.logShard(sh)
+	d.mu.Unlock()
+	return err
+}
+
+// logShard appends sh's records to the log buffer, so a freeze (which holds
+// every shard lock) puts every record of the append level it freezes in the
+// log it closes. The caller holds sh.mu and d.mu.
+func (d *Dict) logShard(sh *shard) error {
+	if sh.nrecs == 0 {
+		return nil
+	}
 	err := d.writable()
 	if err == nil {
 		d.pending = append(d.pending, sh.recs...)
@@ -666,8 +724,25 @@ func (d *Dict) commit(sh *shard) error {
 			err = d.writePending()
 		}
 	}
-	d.mu.Unlock()
 	sh.recs, sh.nrecs = sh.recs[:0], 0
+	sh.unlogged.Store(false)
+	return err
+}
+
+// logShards logs the records every shard still keeps (Sync, Close).
+func (d *Dict) logShards() error {
+	var err error
+	for i := range d.shards {
+		sh := &d.shards[i]
+		if !sh.unlogged.Load() {
+			continue
+		}
+		sh.mu.Lock()
+		d.mu.Lock()
+		err = errors.Join(err, d.logShard(sh))
+		d.mu.Unlock()
+		sh.mu.Unlock()
+	}
 	return err
 }
 
@@ -695,6 +770,9 @@ func (d *Dict) writePending() error {
 // runs without the lock, so appends and lookups go on meanwhile; a frozen
 // append level's log is synced too until its level file is installed.
 func (d *Dict) Sync() error {
+	if err := d.logShards(); err != nil {
+		return err
+	}
 	d.mu.Lock()
 	if err := d.writable(); err != nil {
 		d.mu.Unlock()
@@ -705,8 +783,17 @@ func (d *Dict) Sync() error {
 		return err
 	}
 	log, frozenLog, gen := d.log, d.frozenLog, d.logSeq<<32|uint64(d.logRecs)
+	if gen <= d.synced {
+		// An earlier Sync, flush or open already covers every record: the
+		// producers' drains sync once per new-name batch, not per call.
+		d.mu.Unlock()
+		return nil
+	}
 	d.mu.Unlock()
-	err := log.Sync()
+	err := hook("log-sync")
+	if err == nil {
+		err = log.Sync()
+	}
 	if err == nil && frozenLog != nil {
 		// Closed: its level file is installed, which is durable.
 		if err = frozenLog.Sync(); errors.Is(err, os.ErrClosed) {
@@ -788,7 +875,10 @@ func (d *Dict) freeze(force bool) error {
 		}
 		err = d.err
 	} else if err = d.writable(); err == nil {
-		err = d.writePending()
+		for i := range d.shards {
+			err = errors.Join(err, d.logShard(&d.shards[i]))
+		}
+		err = errors.Join(err, d.writePending())
 	}
 	if err == nil {
 		s := d.snap.Load()
@@ -896,12 +986,13 @@ func (d *Dict) NextID(group string, vshard uint16) uint32 {
 // append level) and syncs the log.
 func (d *Dict) Close() error {
 	d.flushWG.Wait() // the frozen level's file, which also closes its log
+	logErr := d.logShards()
 	d.mu.Lock()
 	if d.closed {
 		d.mu.Unlock()
 		return nil
 	}
-	err := d.err
+	err := errors.Join(d.err, logErr)
 	if err == nil {
 		if err = d.writePending(); err == nil {
 			err = d.log.Sync()
@@ -910,6 +1001,7 @@ func (d *Dict) Close() error {
 	d.closed = true
 	d.log.Close()
 	d.mu.Unlock()
+	err = errors.Join(err, d.pol.close(), d.grp.close())
 	d.flushWG.Wait()
 	d.mergeWG.Wait()
 	return err

@@ -244,6 +244,7 @@ type coreOwner struct {
 	stage      func(string)
 	visible    func(PendingView)
 	lookup     func(uint64) *ApplicationPolicy
+	rows       *PolicyCatalog // lookup's catalog: owner views translate row IDs by page
 	sealTiming func(string, time.Duration)
 
 	failure                      atomic.Pointer[coreFailure]
@@ -441,7 +442,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 			if err != nil {
 				return err
 			}
-			o := &coreOwner{index: s, partSource: partSource, stage: hooks.Stage, sealTiming: hooks.SealTiming, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), lookup: identities.lookup}
+			o := &coreOwner{index: s, partSource: partSource, stage: hooks.Stage, sealTiming: hooks.SealTiming, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), lookup: identities.rowLookup, rows: identities}
 			if hooks.VisiblePending != nil {
 				o.visible = func(v PendingView) { hooks.VisiblePending(s, v) }
 			} else if hooks.Visible != nil {
@@ -1064,7 +1065,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		// L0 files precede visibility: a render never shows a row a kill -9
 		// loses. Without a publication hook they still follow its cadence.
 		if o.cfg.L0 && pend.n > l0Written {
-			path, err := o.writeL0(pend.rawView(nil).Suffix(l0Written))
+			path, err := o.writeL0(o.rawView(&pend).Suffix(l0Written)) // L0 writes durable IDs
 			if err != nil {
 				return err
 			}
@@ -1093,7 +1094,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 		}
 		o.rollups.noteNewNames(&pend, o.lookup)
 		pendingMerge.poll(&pend)
-		published := pend.view(o.lookup)
+		published := o.view(&pend)
 		generation := o.readGeneration
 		if flight != nil {
 			if o.sealDurable {
@@ -1179,7 +1180,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			next.Version = 2
 		}
 		next.Cursors = slices.Clone(pending)
-		frozen := pend.view(o.lookup)
+		frozen := o.view(&pend)
 		next.ArchiveClock = frozen.maxClock(next.ArchiveClock)
 		next.NextPart++
 		f := &sealFlight{rows: head, points: headPoints, oldest: headOldest, pending: frozen, next: next, done: make(chan sealResult, 1), l0: l0Cover, reported: min(publishedBatches, pend.n), expiries: headExpiries}
@@ -1249,7 +1250,7 @@ func (o *coreOwner) poller() func() (bool, bool) {
 			next.Version = 2
 		}
 		next.Cursors = slices.Clone(pending)
-		sealedPending := pend.view(o.lookup)
+		sealedPending := o.view(&pend)
 		next.ArchiveClock = sealedPending.maxClock(next.ArchiveClock)
 		next.NextPart++
 		reported, since := min(publishedBatches, pend.n), headExpiries
@@ -2118,4 +2119,18 @@ func coreRead(s *pebble.Snapshot, id uint64) ([]row, error) {
 	}
 	slices.SortFunc(out, less)
 	return out, it.Error()
+}
+
+// rawView and view are h's views with the owner's page translation of head
+// row IDs (PendingView.durable).
+func (o *coreOwner) rawView(h *pendingHead) PendingView {
+	v := h.rawView(o.lookup)
+	v.rows = o.rows
+	return v
+}
+
+func (o *coreOwner) view(h *pendingHead) PendingView {
+	v := h.view(o.lookup)
+	v.rows = o.rows
+	return v
 }

@@ -94,6 +94,9 @@ func (n *mergeNames) live(k v2part.Key, metaID uint64) (bool, error) {
 		return true, nil
 	}
 	if n.identities != nil {
+		if id, err := n.identities.keyEngineID(metaID, k); err == nil {
+			metaID = id
+		}
 		if h := n.identities.lookup(metaID); h != nil && h.dictID.Load() == k.Local+1 {
 			return true, nil
 		}

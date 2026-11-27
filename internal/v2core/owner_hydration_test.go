@@ -58,7 +58,7 @@ func TestOwnerHydrationSIGKILL(t *testing.T) {
 	}
 	for i, name := range []string{"hydrate.crash.metric", "hydrate.crash.other"} {
 		_, policy := rollupTestPolicy(t, name, "1s:1d,1m:30d", sealrollup.Average, .5)
-		id, order := uint64(7+i), uint64(1+i)
+		id, order := writerID(t, e.identities, uint64(7+i), policy), uint64(1+i)
 		if err = e.AppendBatches(0, []Batch{{ID: id, Order: order, Clock: 1794700800, Policy: policy, Points: []Row{{ID: id, Time: 1794700790, Bits: math.Float64bits(42), Seq: 1}}}}, order, true); err != nil {
 			t.Fatal(err)
 		}
@@ -193,8 +193,8 @@ func TestOwnerHydrationPacesMaintenance(t *testing.T) {
 	}
 	for i, name := range names {
 		_, policy := rollupTestPolicy(t, name, "1s:1d,1m:30d", sealrollup.Average, .5)
-		id := uint64(i + 1)
-		if err = e.AppendBatches(0, []Batch{{ID: id, Order: id, Clock: 1794700800, Policy: policy, Points: []Row{{ID: id, Time: 1794700790, Bits: math.Float64bits(float64(i)), Seq: 1}}}}, id, true); err != nil {
+		id, order := writerID(t, e.identities, uint64(i+1), policy), uint64(i+1)
+		if err = e.AppendBatches(0, []Batch{{ID: id, Order: order, Clock: 1794700800, Policy: policy, Points: []Row{{ID: id, Time: 1794700790, Bits: math.Float64bits(float64(i)), Seq: 1}}}}, order, true); err != nil {
 			t.Fatal(err)
 		}
 	}

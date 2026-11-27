@@ -47,8 +47,10 @@ func (p *Producer) AdoptMove(ctx context.Context, prepared *v2core.PreparedMove,
 }
 
 func (p *Producer) prepareMoveIDs(prepared *v2core.PreparedMove) (map[string]uint64, error) {
-	if err := p.openCatalog(); err != nil {
-		return nil, err
+	if !p.dictStore() {
+		if err := p.openCatalog(); err != nil {
+			return nil, err
+		}
 	}
 	policies := prepared.Policies()
 	names := make([]string, 0, len(policies))
@@ -59,12 +61,28 @@ func (p *Producer) prepareMoveIDs(prepared *v2core.PreparedMove) (map[string]uin
 	}
 	slices.Sort(names)
 	ids := map[string]uint64{}
+	if p.dictStore() {
+		for _, name := range names {
+			h, err := p.engine.AdmitIdentity(name, policies[name])
+			if err != nil {
+				return nil, err
+			}
+			ids[name] = h.ID()
+		}
+		if err := p.engine.Dictionary().Sync(); err != nil {
+			return nil, p.fail(err)
+		}
+		if err := p.Flush(); err != nil {
+			return nil, err
+		}
+		return ids, nil
+	}
 	for _, name := range names {
 		id, err := p.catalog.Intern(name, policies[name])
 		if err != nil {
 			return nil, err
 		}
-		ids[name] = NumericID(id, p.index, p.count)
+		ids[name] = p.applications[id].ID()
 	}
 	if err := p.catalog.Sync(); err != nil {
 		return nil, p.fail(err)

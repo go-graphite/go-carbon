@@ -48,8 +48,9 @@ func mergeAppend(t *testing.T, e *coreEngine, order uint64) {
 	_, policy := rollupTestPolicy(t, "merge.metric", "1s:120,10s:1h", sealrollup.Last, .5)
 	values := []uint64{0, 1 << 63, 0x7ff0000000000000, 0xfff0000000000000, 0x7ff8000000000042, 0x7ff80000000000ab, math.Float64bits(42)}
 	stamp := int64(1000 + order%24)
-	rows := []row{{ID: 7, Time: stamp, Bits: values[order%uint64(len(values))], Seq: order * 3}, {ID: 7, Time: stamp - 4, Bits: values[(order+1)%uint64(len(values))], Seq: order*3 + 1}, {ID: 7, Time: stamp, Bits: values[(order+2)%uint64(len(values))], Seq: order*3 + 2}}
-	if err := e.submitBatches(0, []coreBatch{{ID: 7, Policy: policy, Order: order, Clock: 1030, Points: rows}}, order, true); err != nil {
+	id := writerID(t, e.identities, 7, policy)
+	rows := []row{{ID: id, Time: stamp, Bits: values[order%uint64(len(values))], Seq: order * 3}, {ID: id, Time: stamp - 4, Bits: values[(order+1)%uint64(len(values))], Seq: order*3 + 1}, {ID: id, Time: stamp, Bits: values[(order+2)%uint64(len(values))], Seq: order*3 + 2}}
+	if err := e.submitBatches(0, []coreBatch{{ID: id, Policy: policy, Order: order, Clock: 1030, Points: rows}}, order, true); err != nil {
 		t.Fatal(err)
 	}
 }

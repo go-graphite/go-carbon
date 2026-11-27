@@ -25,6 +25,15 @@ type coreBatch struct {
 	Registered *ApplicationPolicy
 	Points     []row
 }
+
+// rowID is the batch's head row ID: its packed handle's slot, else its ID.
+func (b *coreBatch) rowID() uint64 {
+	if h := b.Registered; h != nil && h.id == b.ID {
+		return h.rowID()
+	}
+	return b.ID
+}
+
 type coreSealInput struct {
 	Rows []row
 	// Pending is the frozen pending view; the rollup planner reads its rows

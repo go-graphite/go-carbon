@@ -89,7 +89,7 @@ func testMoveAdoptVersionsAcrossMerge(t *testing.T, mergeBefore, donorMat, resta
 		t.Fatal(err)
 	}
 	defer prepared.Close()
-	if err = e.AdoptMove(context.Background(), prepared, map[string]uint64{"move.metric": 7}, 1010); err != nil {
+	if err = e.AdoptMove(context.Background(), prepared, map[string]uint64{"move.metric": writerID(t, e.identities, 7, adoptPolicy(t, sealrollup.Sum))}, 1010); err != nil {
 		t.Fatal(err)
 	}
 	value, closer, err := e.DBs()[0].Get(moveAuthorityKey("move.metric"))

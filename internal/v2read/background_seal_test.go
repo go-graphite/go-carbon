@@ -116,6 +116,7 @@ func testBackgroundSealRendersMatchClassic(t *testing.T, maxRows, sealRows int, 
 		name    string
 		policy  []byte
 		classic *whisper.Whisper
+		id      uint64
 	}
 	ms := make([]metric, metrics)
 	names := make([]string, metrics)
@@ -134,7 +135,7 @@ func testBackgroundSealRendersMatchClassic(t *testing.T, maxRows, sealRows int, 
 			t.Fatal(err)
 		}
 		defer w.Close()
-		ms[i] = metric{name: string(p.Name), policy: encoded, classic: w}
+		ms[i] = metric{name: string(p.Name), policy: encoded, classic: w, id: admittedID(t, engine, uint64(i+1), string(p.Name), encoded)}
 		names[i] = ms[i].name
 	}
 	stop := make(chan struct{})
@@ -168,7 +169,7 @@ func testBackgroundSealRendersMatchClassic(t *testing.T, maxRows, sealRows int, 
 			seq++
 			ts := clock - int64(rng.Intn(600))
 			v := float64(rng.Intn(1000)) / 8
-			rows = append(rows, v2core.Row{ID: uint64(i + 1), Time: ts, Bits: math.Float64bits(v), Seq: seq})
+			rows = append(rows, v2core.Row{ID: ms[i].id, Time: ts, Bits: math.Float64bits(v), Seq: seq})
 			pts = append(pts, &whisper.TimeSeriesPoint{Time: int(ts), Value: v})
 		}
 		if err := ms[i].classic.UpdateMany(pts); err != nil {
@@ -176,7 +177,7 @@ func testBackgroundSealRendersMatchClassic(t *testing.T, maxRows, sealRows int, 
 		}
 		cursor++
 		written[i] = true
-		b := v2core.Batch{ID: uint64(i + 1), Policy: ms[i].policy, Order: cursor, Clock: clock, Points: rows}
+		b := v2core.Batch{ID: ms[i].id, Policy: ms[i].policy, Order: cursor, Clock: clock, Points: rows}
 		if err := engine.AppendBatches(0, []v2core.Batch{b}, cursor, false); err != nil {
 			t.Fatal(err)
 		}
@@ -324,6 +325,7 @@ func TestBackgroundSealFullHeadKeepsPublishing(t *testing.T) {
 		name    string
 		policy  []byte
 		classic *whisper.Whisper
+		id      uint64
 	}
 	ms := make([]metric, metrics)
 	for i := range ms {
@@ -341,7 +343,7 @@ func TestBackgroundSealFullHeadKeepsPublishing(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer w.Close()
-		ms[i] = metric{name: string(p.Name), policy: encoded, classic: w}
+		ms[i] = metric{name: string(p.Name), policy: encoded, classic: w, id: admittedID(t, engine, uint64(i+1), string(p.Name), encoded)}
 	}
 	var order, seq uint64
 	cursors := make([]uint64, 2)
@@ -355,11 +357,11 @@ func TestBackgroundSealFullHeadKeepsPublishing(t *testing.T) {
 			seq++
 			ts := clock - int64(rng.Intn(600))
 			v := float64(rng.Intn(1000)) / 8
-			rows = append(rows, v2core.Row{ID: uint64(i + 1), Time: ts, Bits: math.Float64bits(v), Seq: seq})
+			rows = append(rows, v2core.Row{ID: ms[i].id, Time: ts, Bits: math.Float64bits(v), Seq: seq})
 			pts = append(pts, &whisper.TimeSeriesPoint{Time: int(ts), Value: v})
 		}
 		order++
-		return v2core.Batch{ID: uint64(i + 1), Policy: ms[i].policy, Order: order, Clock: clock, Points: rows}, i, pts
+		return v2core.Batch{ID: ms[i].id, Policy: ms[i].policy, Order: order, Clock: clock, Points: rows}, i, pts
 	}
 	classic := func(i int, pts []*whisper.TimeSeriesPoint) {
 		if err := ms[i].classic.UpdateMany(pts); err != nil {
@@ -479,4 +481,19 @@ func TestBackgroundSealFullHeadKeepsPublishing(t *testing.T) {
 	if n := sealStarts.Load(); n < 3 {
 		t.Fatalf("seals %d, want at least 3", n)
 	}
+}
+
+// admittedID is the engine ID a writer uses for name: its packed dictionary
+// ID when the store has a dictionary (core refuses NumericIDs there), else
+// numeric.
+func admittedID(t *testing.T, e *v2core.Engine, numeric uint64, name string, policy []byte) uint64 {
+	t.Helper()
+	h, err := e.AdmitIdentity(name, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h == nil {
+		return numeric
+	}
+	return h.ID()
 }

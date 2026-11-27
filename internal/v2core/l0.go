@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	partsformat "github.com/go-graphite/go-carbon/internal/v2part"
 )
 
 // L0 run files hold an owner's published head between seals (Config.L0).
@@ -23,7 +25,43 @@ import (
 // fsynced: a kill -9 keeps them in the page cache, a power loss may lose them.
 // So Config.L0Dir may put them on tmpfs, which keeps the same guarantee
 // without process or device writes.
-const l0Magic = "V2L0\x01"
+//
+// Version 3 files carry packed dictionary IDs in a compact wire form
+// (l0WireID): 5 uvarint bytes per application for up to 2^15 names per
+// vshard in the first 8 groups, where the packed ID itself takes 8. Version 1
+// files (catalog NumericIDs) stay readable; the daemon maps their IDs through
+// the producer catalog while it loads them, and core deletes them, like any
+// L0 file, once a durable seal covers them.
+const l0Magic = "V2L0\x03"
+
+const l0MagicV1 = "V2L0\x01"
+
+// l0WireID reorders an engine ID so its uvarint is short: a NumericID is
+// id<<1; a packed ID sets bit 0, puts the vshard in bits 1-12, then a group
+// below 8 in 3 bits (bit 13 clear) or any group in 15 bits (bit 13 set),
+// and its dense dictionary ID last, so the high bits stay zero.
+func l0WireID(id uint64) uint64 {
+	if !IsPackedID(id) {
+		return id << 1
+	}
+	g, v, d := UnpackID(id)
+	if g < 8 {
+		return 1 | uint64(v)<<1 | uint64(g)<<14 | uint64(d)<<17
+	}
+	return 1 | uint64(v)<<1 | 1<<13 | uint64(g)<<14 | uint64(d)<<29
+}
+
+// l0ID inverts l0WireID; ok is false for a value it never writes.
+func l0ID(w uint64) (uint64, bool) {
+	if w&1 == 0 {
+		return w >> 1, true
+	}
+	v := uint16(w>>1) & (partsformat.VirtualShards - 1)
+	if w>>13&1 == 0 {
+		return PackID(uint16(w>>14)&7, v, uint32(w>>17)), w < 1<<49
+	}
+	return PackID(uint16(w>>14)&(maxPackedGroups-1), v, uint32(w>>29)), w < 1<<61
+}
 
 var l0Table = crc32.MakeTable(crc32.Castagnoli)
 
@@ -66,13 +104,13 @@ func encodeL0(dst []byte, v PendingView) []byte {
 			}
 			continue
 		}
-		dst = s.appendL0(dst)
+		dst = s.appendL0(dst, v.durable)
 	}
 	return binary.LittleEndian.AppendUint32(dst, crc32.Checksum(dst, l0Table))
 }
 
 func appendL0Batch(dst []byte, b *coreBatch) []byte {
-	dst = binary.AppendUvarint(dst, b.ID)
+	dst = binary.AppendUvarint(dst, l0WireID(b.ID))
 	dst = binary.AppendUvarint(dst, b.Order)
 	dst = binary.AppendVarint(dst, b.Clock)
 	dst = binary.AppendUvarint(dst, uint64(len(b.Policy)))
@@ -88,18 +126,27 @@ func appendL0Batch(dst []byte, b *coreBatch) []byte {
 }
 
 // appendL0 encodes a row segment's applications as appendL0Batch would their
-// decoded batches. Rows ascend, so one cursor walks the escapes.
-func (s *pendingSegment) appendL0(dst []byte) []byte {
+// decoded batches. Rows ascend, so one cursor walks the escapes. Head row
+// IDs (slots) are written as their durable IDs.
+func (s *pendingSegment) appendL0(dst []byte, durableOf func(uint64) uint64) []byte {
 	first := s.firstRow()
 	escape := sort.Search(len(s.escapes), func(i int) bool { return s.escapes[i].Row >= first })
+	var lastRaw, lastID uint64
+	have := false
+	durable := func(raw uint64) uint64 {
+		if !have || raw != lastRaw {
+			lastRaw, lastID, have = raw, durableOf(raw), true
+		}
+		return lastID
+	}
 	idTime := func(pk *pendingPacket, k uint32) (uint64, int64) {
 		if escape < len(s.escapes) && s.escapes[escape].Row == k {
 			e := &s.escapes[escape]
 			escape++
-			return e.ID, e.Time
+			return durable(e.ID), e.Time
 		}
 		r := &s.rows[k]
-		return uint64(r.ID), pk.Base + int64(r.DT)
+		return durable(uint64(r.ID)), pk.Base + int64(r.DT)
 	}
 	for pi := range s.packets {
 		pk := &s.packets[pi]
@@ -112,7 +159,7 @@ func (s *pendingSegment) appendL0(dst []byte) []byte {
 			}
 			order := pk.FirstOrder + uint64(d)
 			app, t := idTime(pk, lo)
-			dst = binary.AppendUvarint(dst, app)
+			dst = binary.AppendUvarint(dst, l0WireID(app))
 			dst = binary.AppendUvarint(dst, order)
 			dst = binary.AppendVarint(dst, pk.Clock)
 			dst = append(dst, 0) // row applications carry no policy bytes
@@ -141,9 +188,10 @@ var errL0Corrupt = errors.New("corrupt L0 run file")
 // decodeL0 returns the applications of one file image. Handles are left nil;
 // the owner resolves them through its catalog when it loads the rows.
 func decodeL0(b []byte) ([]coreBatch, error) {
-	if len(b) < len(l0Magic)+4 || string(b[:len(l0Magic)]) != l0Magic {
+	if len(b) < len(l0Magic)+4 || (string(b[:len(l0Magic)]) != l0Magic && string(b[:len(l0Magic)]) != l0MagicV1) {
 		return nil, errL0Corrupt
 	}
+	compact := b[len(l0Magic)-1] == l0Magic[len(l0Magic)-1]
 	body := b[:len(b)-4]
 	if crc32.Checksum(body, l0Table) != binary.LittleEndian.Uint32(b[len(b)-4:]) {
 		return nil, errL0Corrupt
@@ -176,6 +224,12 @@ func decodeL0(b []byte) ([]coreBatch, error) {
 	for i := range out {
 		b := &out[i]
 		b.ID, b.Order, b.Clock = uv(), uv(), sv()
+		if compact {
+			var ok bool
+			if b.ID, ok = l0ID(b.ID); !ok {
+				bad = true
+			}
+		}
 		if n := uv(); !bad && n > 0 {
 			if n > uint64(len(r)) {
 				return nil, errL0Corrupt
@@ -341,6 +395,12 @@ func (e *coreEngine) LoadL0(keep func(owner int, b *Batch) (bool, error)) error 
 		for i := range batches {
 			b := &batches[i]
 			b.Registered = o.lookup(b.ID)
+			if b.Registered == nil && IsPackedID(b.ID) && len(b.Policy) == 0 {
+				// A name the dictionary alone knows (no catalog bound it).
+				if b.Registered, err = e.identities.dictIdentity(b.ID); err != nil {
+					return fmt.Errorf("%s: L0 application %#x: %w", files[0], b.ID, err)
+				}
+			}
 			if e.cfg.Rollups && b.Registered == nil && len(b.Policy) == 0 {
 				return fmt.Errorf("%s: L0 application %d has no catalog entry", files[0], b.ID)
 			}

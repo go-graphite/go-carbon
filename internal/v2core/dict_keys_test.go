@@ -59,11 +59,15 @@ func TestDictKeysChunks(t *testing.T) {
 			next[i%3]++
 		}
 	}
+	gen := d.Generation()
 	if err := r.dictKeys(d); err != nil {
 		t.Fatal(err)
 	}
-	if !r.dictDirty {
-		t.Fatal("new names appended without dictDirty")
+	if err := d.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if d.Generation() == gen {
+		t.Fatal("new names appended no dictionary record")
 	}
 	for i := range n {
 		m := r.stageMetrics[i]

@@ -17,8 +17,9 @@ import (
 type Application struct {
 	// Registered replaces Name and Policy after RegisterApplication validates them.
 	Registered *v2core.ApplicationPolicy
-	// LocalID is the producer catalog ID returned with Registered. The numeric
-	// mapping and engine epoch validate the pair without probing a catalog.
+	// LocalID is the local ID returned with Registered: the producer catalog
+	// ID, or in a dictionary store the producer's bind order. It validates the
+	// pair without probing the dictionary or a catalog.
 	LocalID  uint64
 	Name     string
 	Policy   []byte
@@ -29,13 +30,22 @@ type Application struct {
 }
 
 // RegisterApplication validates canonical identity and collision/definition
-// equality at admission. It retains no caller-owned bytes.
+// equality at admission. It retains no caller-owned bytes. In a dictionary
+// store every call binds a new local ID, so callers register a name once (the
+// receiver's fingerprint table does).
 func (p *Producer) RegisterApplication(name string, policy []byte) (*v2core.ApplicationPolicy, uint64, error) {
 	if p.failed != nil {
 		return nil, 0, p.failed
 	}
 	if p.layer != 3 {
 		return nil, 0, errors.New("application registration requires the rollup layer")
+	}
+	if p.dictStore() {
+		h, err := p.engine.AdmitIdentity(name, policy)
+		if err != nil {
+			return nil, 0, err
+		}
+		return h, p.bind(h), nil
 	}
 	if err := p.openCatalog(); err != nil {
 		return nil, 0, err
@@ -47,21 +57,33 @@ func (p *Producer) RegisterApplication(name string, policy []byte) (*v2core.Appl
 	return p.application(id)
 }
 
-// application reuses the handle the catalog binding has already validated and
-// installed in this engine epoch, including during recovery.
+// application returns the handle the catalog binding installed in this
+// engine epoch, including during recovery.
 func (p *Producer) application(id uint64) (*v2core.ApplicationPolicy, uint64, error) {
-	if id < uint64(len(p.applications)) && p.applications[id] != nil {
-		return p.applications[id], id, nil
+	if h := p.handle(id); h != nil {
+		return h, id, nil
 	}
-	registered := p.engine.ApplicationPolicy(NumericID(id, p.index, p.count))
-	if registered == nil {
-		return nil, 0, errors.New("application catalog has no bound policy")
+	return nil, 0, errors.New("application catalog has no bound policy")
+}
+
+// bind gives a dictionary store identity the next local ID, its index in
+// the producer's dense handle table. Receivers and AppendApplications read
+// that table per point: one sequential slice read, as for catalog IDs, where
+// resolving the identity's row slot read two scattered pages.
+func (p *Producer) bind(h *v2core.ApplicationPolicy) uint64 {
+	if len(p.applications) == 0 {
+		p.applications = append(p.applications, nil) // local IDs start at 1
 	}
-	for uint64(len(p.applications)) <= id {
-		p.applications = append(p.applications, nil) // catalog IDs are dense
+	p.applications = append(p.applications, h)
+	return uint64(len(p.applications) - 1)
+}
+
+// handle returns the identity bound to a local ID.
+func (p *Producer) handle(id uint64) *v2core.ApplicationPolicy {
+	if id < uint64(len(p.applications)) {
+		return p.applications[id]
 	}
-	p.applications[id] = registered
-	return registered, id, nil
+	return nil
 }
 
 // AppendApplications queues explicit original applications in the pending
@@ -77,7 +99,7 @@ func (p *Producer) AppendApplications(apps []Application) error {
 	}
 	n, order := 0, p.applyOrder
 	for _, a := range apps {
-		if (a.Registered == nil && a.Name == "") || (a.Registered != nil && (a.LocalID == 0 || a.LocalID >= uint64(len(p.applications)) || !p.engine.MatchesApplicationPolicy(a.Registered, NumericID(a.LocalID, p.index, p.count)) || a.Name != "" || len(a.Policy) != 0)) || a.Order <= order || len(a.Points) == 0 || len(a.Points) != len(a.Sequence) || len(a.Points) > 32768 || n > 32768-len(a.Points) {
+		if (a.Registered == nil && a.Name == "") || (a.Registered != nil && (a.LocalID == 0 || p.handle(a.LocalID) != a.Registered || a.Name != "" || len(a.Policy) != 0)) || a.Order <= order || len(a.Points) == 0 || len(a.Points) != len(a.Sequence) || len(a.Points) > 32768 || n > 32768-len(a.Points) {
 			return p.fail(errors.New("invalid original application"))
 		}
 
@@ -103,7 +125,11 @@ func (p *Producer) AppendApplications(apps []Application) error {
 		registered, id := a.Registered, a.LocalID
 		if registered == nil {
 			var err error
-			registered, id, err = p.RegisterApplication(a.Name, a.Policy)
+			if p.dictStore() {
+				registered, err = p.engine.AdmitIdentity(a.Name, a.Policy) // binds no local ID
+			} else {
+				registered, id, err = p.RegisterApplication(a.Name, a.Policy)
+			}
 			if err != nil {
 				return p.fail(err)
 			}
@@ -119,11 +145,15 @@ func (p *Producer) AppendApplications(apps []Application) error {
 		}
 		start := len(rows)
 		for j, point := range a.Points {
-			rows = append(rows, v2core.Row{ID: NumericID(id, p.index, p.count), Time: point.Timestamp, Bits: math.Float64bits(point.Value), Seq: a.Sequence[j]})
+			rows = append(rows, v2core.Row{ID: registered.ID(), Time: point.Timestamp, Bits: math.Float64bits(point.Value), Seq: a.Sequence[j]})
 		}
-		batches[i] = v2core.Batch{ID: NumericID(id, p.index, p.count), Order: a.Order, Clock: a.Clock, Points: rows[start:len(rows):len(rows)]}
+		batches[i] = v2core.Batch{ID: registered.ID(), Order: a.Order, Clock: a.Clock, Points: rows[start:len(rows):len(rows)]}
 		// Classic mirroring consumes the original immutable canonical bytes.
-		_, batches[i].Policy, _ = p.catalog.Lookup(id)
+		if p.dictStore() {
+			batches[i].Policy = registered.Definition()
+		} else {
+			_, batches[i].Policy, _ = p.catalog.Lookup(id)
+		}
 	}
 	if direct {
 		p.packets[len(p.packets)-1].cursor = order

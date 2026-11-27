@@ -37,7 +37,7 @@ func TestIDKeyedSealNoNameRanks(t *testing.T) {
 			if handles[i] == nil {
 				name := fmt.Sprintf("numeric.seal.%06d", len(handles)-i)
 				_, raw := rollupTestPolicy(t, name, "10s:3d,1m:14d", sealrollup.Last, .1)
-				h, err := r.identities.intern(uint64(i+1), name, raw)
+				h, err := r.identities.admit(name, raw)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -67,7 +67,7 @@ func TestIDKeyedSealNoNameRanks(t *testing.T) {
 		other := newCoreRollups()
 		other.identities = r.identities
 		for i := count - 1; i >= 0; i-- {
-			id := uint64(i + 1)
+			id := handles[i].id
 			m := r.installed(id)
 			md := r.meta[r.slotOf(id, m)]
 			rollupTestInstall(other, id, m, md)

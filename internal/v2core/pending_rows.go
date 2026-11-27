@@ -141,8 +141,9 @@ func (p *pendingRows) append(batches []coreBatch) {
 	for i := range batches {
 		b := &batches[i]
 		p.startApplication(b.Order, b.Clock, b.Points[0].Time, len(b.Points))
+		id := b.rowID()
 		for j := range b.Points {
-			p.addRow(b.ID, b.Points[j].Time, b.Points[j].Bits, b.Points[j].Seq)
+			p.addRow(id, b.Points[j].Time, b.Points[j].Bits, b.Points[j].Seq)
 		}
 	}
 	p.closePacket()
@@ -252,7 +253,7 @@ func (b *Outbox) Start(h *ApplicationPolicy, order uint64, clock, first int64, n
 	if h == nil || h.catalog != b.catalog || n < 1 || n > pendingPacketRows {
 		return errors.New("outbox application requires an engine policy and 1..32768 points")
 	}
-	b.open, b.id = &b.owners[int(h.vshard)%len(b.owners)], h.id
+	b.open, b.id = &b.owners[int(h.vshard)%len(b.owners)], h.rowID()
 	b.open.startApplication(order, clock, first, n)
 	return nil
 }
@@ -277,6 +278,7 @@ func (p *pendingRows) decodeFrom(lookup func(uint64) *ApplicationPolicy) []coreB
 	last := &p.packets[len(p.packets)-1]
 	var dst []coreBatch
 	arena := make([]row, last.FirstRow+last.Rows-first)
+	var lastRaw, id uint64
 	escape := sort.Search(len(p.escapes), func(i int) bool { return p.escapes[i].Row >= first })
 	for pi := range p.packets {
 		pk := &p.packets[pi]
@@ -294,10 +296,13 @@ func (p *pendingRows) decodeFrom(lookup func(uint64) *ApplicationPolicy) []coreB
 				seq = p.seqs[pk.Seqs+k]
 			}
 			src := p.rows[ri]
-			id, t := uint64(src.ID), pk.Base+int64(src.DT)
+			raw, t := uint64(src.ID), pk.Base+int64(src.DT)
 			if escape < len(p.escapes) && p.escapes[escape].Row == ri {
-				id, t = p.escapes[escape].ID, p.escapes[escape].Time
+				raw, t = p.escapes[escape].ID, p.escapes[escape].Time
 				escape++
+			}
+			if raw != lastRaw || ri == first {
+				lastRaw, id = raw, durableID(raw, lookup)
 			}
 			arena[ri-first] = row{ID: id, Time: t, Bits: src.Bits, Seq: seq}
 			if start >= 0 && delta == prev {
