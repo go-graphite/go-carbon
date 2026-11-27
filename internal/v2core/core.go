@@ -24,7 +24,6 @@ import (
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/objstorage/objstorageprovider"
 	"github.com/cockroachdb/pebble/sstable"
-	"github.com/cockroachdb/pebble/vfs"
 	"github.com/go-graphite/go-carbon/internal/v2dict"
 	"github.com/go-graphite/go-carbon/internal/v2part"
 	"golang.org/x/sync/errgroup"
@@ -426,7 +425,7 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 	for s := 0; s < cfg.Shards; s++ {
 		opening.Go(func() error {
 			dir := filepath.Join(root, fmt.Sprintf("owner-%03d", s))
-			opts := &pebble.Options{ReadOnly: readOnly, FS: ownerMetadataFS{vfs.Default}, MemTableSize: 16 << 20, MaxConcurrentCompactions: func() int { return 2 }}
+			opts := &pebble.Options{ReadOnly: readOnly, FS: ownerMetadataFS{ownerFS}, MemTableSize: 16 << 20, MaxConcurrentCompactions: func() int { return 2 }}
 
 			opts.Experimental.TableCacheShards = 1
 			opts.BytesPerSync = 64 << 20
@@ -441,6 +440,16 @@ func openCoreMode(root string, cfg coreConfig, hooks coreHooks, readOnly bool) (
 			db, err := pebble.Open(dir, opts)
 			if err != nil {
 				return err
+			}
+			if !readOnly {
+				// Make parts/ durable once per open, so seals sync only parts/.
+				err = os.MkdirAll(filepath.Join(dir, "parts"), 0750)
+				if err == nil {
+					err = SyncPartDirectory(dir)
+				}
+				if err != nil {
+					return errors.Join(err, db.Close())
+				}
 			}
 			o := &coreOwner{index: s, partSource: partSource, stage: hooks.Stage, sealTiming: hooks.SealTiming, db: db, dir: dir, cfg: cfg, dead: make(chan struct{}), done: make(chan error, 1), lookup: identities.rowLookup, rows: identities}
 			if hooks.VisiblePending != nil {
@@ -1784,7 +1793,7 @@ func (o *coreOwner) sealBatches(head []row, points int, oldest int64, pending Pe
 	var total uint64
 	stage := func(suffix string) (*sstable.Writer, string, error) {
 		path := filepath.Join(o.dir, fmt.Sprintf("stage-%020d-%s.sst", o.meta.NextPart, suffix))
-		f, err := vfs.Default.Create(path)
+		f, err := ownerFS.Create(path)
 		if err != nil {
 			return nil, "", err
 		}
@@ -1970,38 +1979,66 @@ func (o *coreOwner) sealBatches(head []row, points int, oldest int64, pending Pe
 		total += uint64(st.Size())
 	}
 	if len(descriptors) > 0 {
-		slices.SortFunc(descriptors, func(a, b coreKV) int { return bytes.Compare(a.Key, b.Key) })
-		w, _, e := stage("parts")
-		if e != nil {
+		// One parts/ sync makes this seal's links and sidecars durable before
+		// any descriptor names them. A crash before publication leaves orphans.
+		if e := syncRetainedParts(o.dir); e != nil {
 			return 0, e
 		}
+		slices.SortFunc(descriptors, func(a, b coreKV) int { return bytes.Compare(a.Key, b.Key) })
+	}
+	publish := func() error { return o.db.Ingest(paths) }
+	if len(paths) == 0 {
+		// Descriptors and frontier only: one synced batch (one WAL fsync), as
+		// merges publish, instead of two staged SSTs, a directory and a
+		// manifest sync. The batch is atomic, like the single manifest edit.
 		for _, kv := range descriptors {
-			if e = w.Set(kv.Key, kv.Value); e != nil {
-				break
+			if err = batch.Set(kv.Key, kv.Value, nil); err != nil {
+				return 0, err
 			}
 		}
-		e = errors.Join(e, w.Close())
-		if e != nil {
-			return 0, e
+		if err = batch.Set(coreMetaKey, meta, nil); err != nil {
+			return 0, err
 		}
+		total += uint64(len(batch.Repr()))
+		publish = func() error {
+			if o.stage != nil {
+				o.stage("ingest")
+			}
+			return batch.Commit(pebble.Sync)
+		}
+	} else {
+		if len(descriptors) > 0 {
+			w, _, e := stage("parts")
+			if e != nil {
+				return 0, e
+			}
+			for _, kv := range descriptors {
+				if e = w.Set(kv.Key, kv.Value); e != nil {
+					break
+				}
+			}
+			e = errors.Join(e, w.Close())
+			if e != nil {
+				return 0, e
+			}
+		}
+		metadata, mp, err := stage("frontier")
+		if err != nil {
+			return 0, err
+		}
+		err = metadata.Set(coreMetaKey, meta)
+		err = errors.Join(err, metadata.Close())
+		if err != nil {
+			return 0, err
+		}
+		st, err := os.Stat(mp)
+		if err != nil {
+			return 0, err
+		}
+		total += uint64(st.Size())
 	}
-
-	metadata, mp, err := stage("frontier")
-	if err != nil {
-		return 0, err
-	}
-	err = metadata.Set(coreMetaKey, meta)
-	err = errors.Join(err, metadata.Close())
-	if err != nil {
-		return 0, err
-	}
-	st, err := os.Stat(mp)
-	if err != nil {
-		return 0, err
-	}
-	total += uint64(st.Size())
-	// One manifest edit atomically publishes all disjoint data/frontier SSTs.
-	// An interrupted ingestion can never advance the frontier without its data.
+	// One manifest edit (or one synced batch) atomically publishes data and
+	// frontier. An interrupted publication never advances the frontier alone.
 	o.encodeNS.Add(uint64(time.Since(phaseStart)))
 	ingestStart := time.Now()
 	defer func() { o.ingestNS.Add(uint64(time.Since(ingestStart))) }()
@@ -2009,7 +2046,7 @@ func (o *coreOwner) sealBatches(head []row, points int, oldest int64, pending Pe
 	if o.gc != nil {
 		o.gc.mu.Lock()
 	}
-	err = o.db.Ingest(paths)
+	err = publish()
 	if o.gc != nil {
 		if err == nil {
 			o.gc.inventory = o.gc.inventory.with(descriptors, nil)
