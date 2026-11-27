@@ -51,11 +51,12 @@ type retireFixture struct {
 	padding int // synthetic old-generation keys per published name
 }
 
-// newRetireFixture interrupts a combine after publishing the first publish
-// names, leaving the rest on their original IDs. Each published name's old
+// newRetireFixture interrupts a combine after publishing all but the last
+// name, which keeps its original ID. Each published name's old
 // generation gets extra keys so its retirement needs several WAL batches.
-func newRetireFixture(t *testing.T, names []string, publish int) *retireFixture {
+func newRetireFixture(t *testing.T, names []string) *retireFixture {
 	t.Helper()
+	publish := len(names) - 1
 	ctx := context.Background()
 	f := &retireFixture{fs: vfs.NewStrictMem(), names: names, old: map[string]Metadata{}, before: map[string][]byte{}, padding: 60000}
 	f.opts = Options{fs: f.fs, ExactBlocks: true, CacheSize: 1 << 20, MemTableSize: 1 << 20, SyncInterval: time.Hour}
@@ -147,8 +148,9 @@ func (f *retireFixture) reopen(t *testing.T) {
 
 // verify checks that no published name's old generation keeps a key, that
 // unpublished names keep theirs, and that every name reads back unchanged.
-func (f *retireFixture) verify(t *testing.T, publish int) {
+func (f *retireFixture) verify(t *testing.T) {
 	t.Helper()
+	publish := len(f.names) - 1
 	ctx := context.Background()
 	for i, name := range f.names {
 		n := countIDKeys(t, f.s, f.old[name].ID)
@@ -171,7 +173,7 @@ func (f *retireFixture) verify(t *testing.T, publish int) {
 func TestNativeAbandonRetiresPublishedOldGenerations(t *testing.T) {
 	names := []string{"retire.a", "retire.b", "retire.c"}
 	const publish = 2
-	f := newRetireFixture(t, names, publish)
+	f := newRetireFixture(t, names)
 	defer func() { closeTestStore(t, f.s) }()
 	for i := 0; i < publish; i++ {
 		if n := countIDKeys(t, f.s, f.old[names[i]].ID); n < f.padding {
@@ -193,9 +195,9 @@ func TestNativeAbandonRetiresPublishedOldGenerations(t *testing.T) {
 		t.Fatal("old generations not retired in bounded batches", batches)
 	}
 	f.s.nativeTestHook = nil
-	f.verify(t, publish)
+	f.verify(t)
 	f.reopen(t)
-	f.verify(t, publish)
+	f.verify(t)
 }
 
 func TestNativeAbandonInterruptedRetireResumes(t *testing.T) {
@@ -203,7 +205,7 @@ func TestNativeAbandonInterruptedRetireResumes(t *testing.T) {
 		t.Run(stage, func(t *testing.T) {
 			names := []string{"resume.a", "resume.b", "resume.c"}
 			const publish = 2
-			f := newRetireFixture(t, names, publish)
+			f := newRetireFixture(t, names)
 			defer func() { closeTestStore(t, f.s) }()
 			hits := 0
 			f.s.nativeTestHook = func(got string) error {
@@ -229,7 +231,7 @@ func TestNativeAbandonInterruptedRetireResumes(t *testing.T) {
 			if err != nil || out.State != "abandoned" || out.PublishedNames != publish {
 				t.Fatal(out, err)
 			}
-			f.verify(t, publish)
+			f.verify(t)
 		})
 	}
 }
@@ -266,7 +268,7 @@ func TestNativeRetainedOversizedIntentRetiresPublished(t *testing.T) {
 	names := []string{"retained.a", "retained.b", "retained.c"}
 	const publish = 2
 	t.Run("batches", func(t *testing.T) {
-		f := newRetireFixture(t, names, publish)
+		f := newRetireFixture(t, names)
 		defer func() { closeTestStore(t, f.s) }()
 		padNativeCombineIntent(t, f.s, f.id)
 		batches, marks := 0, 0
@@ -286,7 +288,7 @@ func TestNativeRetainedOversizedIntentRetiresPublished(t *testing.T) {
 		if batches < 2*publish || marks != 1 {
 			t.Fatal("not retired in bounded batches", batches, marks)
 		}
-		f.verify(t, publish)
+		f.verify(t)
 		// Marked pieces are skipped on the next start; the intent is retained.
 		batches = 0
 		if err := f.s.recoverNativeCombines(); err != nil || batches != 0 {
@@ -302,10 +304,10 @@ func TestNativeRetainedOversizedIntentRetiresPublished(t *testing.T) {
 		if err != nil || out.State != "abandoned" || out.PublishedNames != publish {
 			t.Fatal(out, err)
 		}
-		f.verify(t, publish)
+		f.verify(t)
 	})
 	t.Run("crash-then-open", func(t *testing.T) {
-		f := newRetireFixture(t, names, publish)
+		f := newRetireFixture(t, names)
 		defer func() { closeTestStore(t, f.s) }()
 		padNativeCombineIntent(t, f.s, f.id)
 		hits := 0
@@ -326,7 +328,7 @@ func TestNativeRetainedOversizedIntentRetiresPublished(t *testing.T) {
 		}
 		// Open replays the retirement from the unmarked piece records.
 		f.reopen(t)
-		f.verify(t, publish)
+		f.verify(t)
 		if _, c, err := f.s.db.Get(nativeCombineIntentKey(f.id)); err != nil {
 			t.Fatal("intent not retained", err)
 		} else {
