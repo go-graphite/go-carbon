@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -32,11 +33,13 @@ const MaxPolicies = math.MaxUint16
 
 type policyTable struct {
 	file string
-	mu   sync.Mutex // appends and the index map
+	mu   sync.Mutex // appends
 	f    *os.File
 	byID atomic.Pointer[[][]byte] // suffix of index i at [i-1]; copy on write
-	ix   map[string]uint16
-	err  error // sticky: a failed write may leave a partial record
+	// ix maps a suffix to its index, copy on write like byID, so a known
+	// suffix (every name admitted after its policy's first) takes no lock.
+	ix  atomic.Pointer[map[string]uint16]
+	err error // sticky: a failed write may leave a partial record
 }
 
 // openPolicies loads dir's policy table, without a torn last record.
@@ -47,7 +50,7 @@ func (t *policyTable) open(dir, file string) error {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	t.ix = map[string]uint16{}
+	ix := map[string]uint16{}
 	var byID [][]byte
 	off := 0
 	for off+8 <= len(data) {
@@ -60,11 +63,11 @@ func (t *policyTable) open(dir, file string) error {
 			break
 		}
 		suffix := slices.Clone(p[2:])
-		if _, dup := t.ix[string(suffix)]; dup {
+		if _, dup := ix[string(suffix)]; dup {
 			break
 		}
 		byID = append(byID, suffix)
-		t.ix[string(suffix)] = uint16(len(byID))
+		ix[string(suffix)] = uint16(len(byID))
 		off += 8 + size
 	}
 	if t.f, err = os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0o644); err != nil {
@@ -79,6 +82,7 @@ func (t *policyTable) open(dir, file string) error {
 		return err
 	}
 	t.byID.Store(&byID)
+	t.ix.Store(&ix)
 	return nil
 }
 
@@ -100,9 +104,18 @@ func (d *Dict) Group(i uint16) (string, bool) {
 
 // internTable appends key to t once, durably, and returns its index.
 func (d *Dict) internTable(t *policyTable, suffix []byte) (uint16, error) {
+	if ix := t.ix.Load(); ix != nil {
+		if i, ok := (*ix)[string(suffix)]; ok {
+			return i, nil
+		}
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if i, ok := t.ix[string(suffix)]; ok {
+	var ix map[string]uint16
+	if p := t.ix.Load(); p != nil {
+		ix = *p
+	}
+	if i, ok := ix[string(suffix)]; ok {
 		return i, nil
 	}
 	if err := d.writableShared(); err != nil {
@@ -139,7 +152,12 @@ func (d *Dict) internTable(t *policyTable, suffix []byte) (uint16, error) {
 	owned := slices.Clone(suffix)
 	next := append(slices.Clip(byID), owned)
 	t.byID.Store(&next)
-	t.ix[string(owned)] = i
+	nix := maps.Clone(ix)
+	if nix == nil {
+		nix = map[string]uint16{}
+	}
+	nix[string(owned)] = i
+	t.ix.Store(&nix)
 	return i, nil
 }
 
