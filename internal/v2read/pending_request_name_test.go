@@ -32,7 +32,8 @@ func TestPendingRequestNameDoesNotReconstruct(t *testing.T) {
 	}()
 	name := strings.Repeat("pending.identity.", 20) + "metric"
 	policy := testPolicy(t, name)
-	b := v2core.Batch{ID: 1, Policy: policy, Order: 1, Clock: 1700000003, Points: []v2core.Row{{ID: 1, Time: 1700000001, Bits: math.Float64bits(1), Seq: 1}}}
+	id := admittedID(t, e, 1, name, policy)
+	b := v2core.Batch{ID: id, Policy: policy, Order: 1, Clock: 1700000003, Points: []v2core.Row{{ID: id, Time: 1700000001, Bits: math.Float64bits(1), Seq: 1}}}
 	if err = e.AppendBatches(0, []v2core.Batch{b}, 1, true); err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +44,7 @@ func TestPendingRequestNameDoesNotReconstruct(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := e.ApplicationPolicy(1)
+	h := e.ApplicationPolicy(id)
 	var got string
 	if baseline := testing.AllocsPerRun(10, func() { got = h.Name() }); baseline == 0 || got != name {
 		t.Fatal("fixture did not require reverse dictionary reconstruction")

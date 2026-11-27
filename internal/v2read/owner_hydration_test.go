@@ -40,12 +40,13 @@ func TestExactReadBeforeOwnerHydration(t *testing.T) {
 	r, e := open(nil)
 	names := []string{"cold.exact.first", "cold.exact.second"}
 	for i, name := range names {
-		id := uint64(i + 1)
+		order := uint64(i + 1)
 		policy, err := v2core.EncodeRollupPolicy(v2core.RollupPolicy{Name: v2part.ID(name), Group: "test", Config: sealrollup.Config{Method: sealrollup.Last, Archives: []sealrollup.Archive{{Step: 1, Count: 100}}}})
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = e.AppendBatches(0, []v2core.Batch{{ID: id, Order: id, Clock: 1000, Policy: policy, Points: []v2core.Row{{ID: id, Time: 990, Bits: math.Float64bits(float64(40 + i)), Seq: id}}}}, id, true)
+		id := admittedID(t, e, order, name, policy)
+		err = e.AppendBatches(0, []v2core.Batch{{ID: id, Order: order, Clock: 1000, Policy: policy, Points: []v2core.Row{{ID: id, Time: 990, Bits: math.Float64bits(float64(40 + i)), Seq: order}}}}, order, true)
 		if err != nil {
 			t.Fatal(err)
 		}
