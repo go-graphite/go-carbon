@@ -36,7 +36,7 @@ type v2Config struct {
 	SealInterval *Duration `toml:"seal-interval"`
 	SealMaxRows  int       `toml:"seal-max-rows"`
 	// FutureLimit refuses points stamped further ahead than this; 0 keeps all.
-	FutureLimit *Duration `toml:"future-limit"`
+	FutureLimit Duration `toml:"future-limit"`
 
 	Enabled bool   `toml:"enabled"`
 	Mode    string `toml:"mode"`
@@ -214,9 +214,7 @@ func (app *App) startV2() error {
 	// publication. With no fsync to batch, producers hand rows to core every
 	// 100 ms, so the kill-loss window is about one publication.
 	storeConfig := v2daemon.Config{BaselinePath: c.V2.BaselinePath, Layer: 3, Producers: n, Shards: shards, GroupInterval: v2L0Drain, SealInterval: sealInterval, SealMaxRows: c.V2.SealMaxRows, L0Dir: l0Dir, Hooks: hooks}
-	if c.V2.FutureLimit != nil {
-		storeConfig.FutureLimit = c.V2.FutureLimit.Value()
-	}
+	storeConfig.FutureLimit = c.V2.FutureLimit.Value()
 	storeConfig.Prepare = func() error {
 		if err := app.prepareV2Fallback(mode); err != nil {
 			return err
