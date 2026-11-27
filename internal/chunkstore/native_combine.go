@@ -38,6 +38,9 @@ type nativeCombinePiece struct {
 	Deferred bool
 	Skipped  *NativeSkip `json:",omitempty"`
 	InPlace  bool        `json:",omitempty"`
+	// Retired records that Old was retired before the final receipt, by an
+	// abandoned or retained oversized combine. Retiring it again is a no-op.
+	Retired bool `json:",omitempty"`
 }
 
 type nativeCombinePrepared struct {

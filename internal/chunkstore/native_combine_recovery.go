@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -61,6 +62,19 @@ func (s *Store) recoverNativeCombines() error {
 			// store must not decode an oversized intent or silently abandon it.
 			s.pebbleOptions.Logger.Infof("native combine %s retained: metadata %d bytes exceeds %d-byte budget", it.Key(), len(it.Value()), nativeRangeMetadataBytes)
 			s.nativeCounters.errors.Add(1)
+			// Names it already published never reach the final receipt's
+			// retirement. Retire their old generations from the streamed piece
+			// records (marked, so a later start skips them) without decoding
+			// the intent; the intent and the records themselves stay.
+			retired, err := s.retireNativeCombinePieces(context.Background(), identity)
+			if err != nil {
+				s.pebbleOptions.Logger.Infof("ERROR native combine %s retained: retire published old generations after %d names: %v", it.Key(), retired, err)
+				s.nativeCounters.errors.Add(1)
+				continue
+			}
+			if retired > 0 {
+				s.pebbleOptions.Logger.Infof("native combine %s retained: retired %d published names' old generations", it.Key(), retired)
+			}
 			continue
 		}
 		var intent nativeCombineIntent

@@ -59,6 +59,8 @@ func (s *Store) fenceNativeAbandon() error {
 
 // AbandonNativeCombine explicitly retires the exact legacy identity without
 // publishing another name. It never decodes Raw, Origins, Positions, or Names.
+// Names already published keep their new IDs; the generations they replaced
+// are retired, one streamed piece record at a time, before the records go.
 // Pebble still supplies its monolithic encoded intent value; decoder scratch,
 // published-ID protection and every delete batch have independent fixed caps.
 func (s *Store) AbandonNativeCombine(ctx context.Context, identity string) (out NativeAbandonReceipt, err error) {
@@ -161,6 +163,15 @@ func (s *Store) AbandonNativeCombine(ctx context.Context, identity string) (out 
 		if err := s.nativeStep("abandon-cleaned"); err != nil {
 			return out, err
 		}
+	}
+	// Each published piece replaced an old generation that only its piece
+	// record still names. Retire it before the record goes, as the final
+	// receipt would have done; a crash in between replays the retirement.
+	if _, err := s.retireNativeCombinePieces(ctx, identity); err != nil {
+		return out, err
+	}
+	if err := s.nativeStep("abandon-retired"); err != nil {
+		return out, err
 	}
 	prefix := nativeCombinePiecePrefix(identity)
 	if err := s.deleteNativeAbandonSpan(ctx, nativeSpan{prefix, prefixEnd(prefix)}, nil, &out); err != nil {
