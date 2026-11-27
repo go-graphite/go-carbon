@@ -20,6 +20,9 @@ func (s *pressureExpirationStore) ExpirationPressure() (int64, uint64, bool) {
 }
 
 func TestExpirationDryRunLimitsAndPressure(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	now := time.Unix(100000, 0)
 	db := expirationTestDB(t, &now)
 	old := createExpirationMetric(t, db, "jobs.old")

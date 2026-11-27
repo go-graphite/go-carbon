@@ -71,7 +71,7 @@ func openDigest(input digestInput) (*digestCursor, error) {
 }
 func (c *digestCursor) next() error {
 	line, e := c.reader.ReadBytes('\n')
-	if e == io.EOF && len(line) == 0 {
+	if errors.Is(e, io.EOF) && len(line) == 0 {
 		c.eof = true
 		if c.bytes != c.input.Bytes || hex.EncodeToString(c.sum.Sum(nil)) != c.input.SHA256 {
 			return fmt.Errorf("digest stream size/SHA differs: %s", c.input.Host)

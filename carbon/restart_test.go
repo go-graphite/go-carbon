@@ -111,6 +111,9 @@ func restartTestConfig(t *testing.T, root string) string {
 // A start after a dump stop reports the handoff it received: the stop's
 // duration, the input gap, the dump it restored and how it started.
 func TestRestartMetricsAfterHandoff(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	root := t.TempDir()
 	config := restartTestConfig(t, root)
 	first := startRestored(t, config)
@@ -180,6 +183,9 @@ func TestRestartMetricsAfterHandoff(t *testing.T) {
 // A dump without its record is a clean restart; a record whose dump is gone
 // is stale and ignored.
 func TestRestartKindCleanAndStaleRecord(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	root := t.TempDir()
 	config := restartTestConfig(t, root)
 	first := startRestored(t, config)

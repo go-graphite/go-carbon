@@ -168,10 +168,7 @@ func TestSyncRetryRealShapeStopsBeforeCatalogVerification(t *testing.T) {
 	if n := len(s.resolvedWindowSelections()[syncWindowSelectionKey{1, syncD1}]); n != retried-unknown {
 		t.Fatal("resolved membership", n)
 	}
-	kept, err := verificationCheckpointRows(j.rows)
-	if err != nil {
-		t.Fatal(err)
-	}
+	kept := verificationCheckpointRows(j.rows)
 	found := false
 	for _, r := range kept {
 		found = found || r.Kind == "window-retry-terminal"

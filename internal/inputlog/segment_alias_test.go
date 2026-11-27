@@ -1,6 +1,7 @@
 package inputlog
 
 import (
+	"errors"
 	"io"
 	"math"
 	"os"
@@ -55,7 +56,7 @@ func TestSegmentTaggedBatchOrder(t *testing.T) {
 			got, rawGot := map[string][]points.Point{}, map[string][]points.Point{}
 			for {
 				records, _, _, err := r.Next(info.Size())
-				if err == io.EOF {
+				if errors.Is(err, io.EOF) {
 					break
 				}
 				if err != nil {

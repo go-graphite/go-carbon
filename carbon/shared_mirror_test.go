@@ -54,6 +54,9 @@ func TestMirrorPathsRejectPhysicalOverlap(t *testing.T) {
 }
 
 func TestMirrorConfigRequiresWriteOnlyCanary(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	_, base := sharedAppConfig(t)
 	base.Whisper.StoreMirrorFiles = true
 	base.Whisper.StoreEncoding = "exact"

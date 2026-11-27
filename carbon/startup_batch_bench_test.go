@@ -5,11 +5,12 @@ package carbon
 import (
 	"bytes"
 	"fmt"
-	"github.com/go-graphite/go-carbon/internal/recovery/capturetest"
 	"math"
 	"os"
 	"syscall"
 	"testing"
+
+	"github.com/go-graphite/go-carbon/internal/recovery/capturetest"
 
 	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/internal/inputlog"
@@ -87,17 +88,18 @@ func BenchmarkCaptureBatchReplay(b *testing.B) {
 			for range b.N {
 				source := stream.Next()
 				var err error
-				if mode == "inputlog" {
+				switch {
+				case mode == "inputlog":
 					seg := &startupSegment{file: file, source: source}
 					seg.size.Store(int64(len(inputWire)))
 					_, err = s.replayInputSegment(seg, sink, 0, func(int64, int) {})
-				} else if mode != "original" {
+				case mode != "original":
 					wire := encoded
 					if mode == "grouped-capture" {
 						wire = groupedEncoded
 					}
 					_, err = s.replayCaptureBatches(bytes.NewReader(wire), source, sink, func(int64, int) {})
-				} else {
+				default:
 					_, err = recovery.ReadCaptureFramesPipeline(bytes.NewReader(encoded), 4<<20, func(raw []byte, _ int, _ <-chan struct{}) (int64, error) { return captureMetricBytes(raw, core) }, func(raw []byte, n int, _, cost int64) error {
 						if !core.HasRecoveryCapacityBatch(n, cost) {
 							b.Fatal("admission")

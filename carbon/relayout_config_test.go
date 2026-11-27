@@ -9,6 +9,9 @@ import (
 )
 
 func TestRelayoutSpaceConfig(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	cfg := NewConfig()
 	if cfg.Whisper.StoreTimeBucketsRelayoutMinFree != store.DefaultRelayoutMinFreeBytes || cfg.Whisper.StoreTimeBucketsRelayoutMaxDebt != store.DefaultRelayoutMaxCompactionDebt || cfg.Whisper.StoreTimeBucketsRelayoutReclaimBytes != store.DefaultRelayoutReclaimBytes {
 		t.Fatal("unexpected relayout pressure defaults")

@@ -84,7 +84,7 @@ func TestReadContextParentsDifferential(t *testing.T) {
 			case <-time.After(2 * time.Second):
 				t.Fatal("oracle context did not cancel")
 			}
-			if got.Err() != want.Err() {
+			if !errors.Is(got.Err(), want.Err()) {
 				t.Fatalf("cancellation: got %v, want %v", got.Err(), want.Err())
 			}
 		})

@@ -179,6 +179,9 @@ func TestMetadataCheckpointLoadsAlongsideWriteout(t *testing.T) {
 }
 
 func TestMetadataPrewarmCompletesRestartBudget(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	db, err := store.Open(t.TempDir(), store.Options{MetadataCacheSize: 1 << 20, CacheSize: 1 << 20, MemTableSize: 1 << 20})
 	if err != nil {
 		t.Fatal(err)
@@ -241,6 +244,9 @@ func TestRestartHistoryState(t *testing.T) {
 }
 
 func TestRestartHistoryWaitsForPendingConfirmation(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	_, path := intakeTailFixture(t, 2, 2, true, 1, 0)
 	dir := filepath.Dir(path)
 	bundle, err := recovery.OpenBundle(dir, dir)

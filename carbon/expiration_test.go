@@ -137,6 +137,9 @@ func TestExpirationBoundaryAndPendingWrites(t *testing.T) {
 }
 
 func TestExpirationStaleCandidatePreservesNewWrite(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	now := time.Unix(100_000, 0)
 	db := expirationTestDB(t, &now)
 	m := createExpirationMetric(t, db, "metric")

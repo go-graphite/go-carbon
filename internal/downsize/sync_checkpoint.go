@@ -192,14 +192,14 @@ func keepVerificationRow(row syncRow) bool {
 	return false
 }
 
-func verificationCheckpointRows(rows []syncRow) ([]syncRow, error) {
+func verificationCheckpointRows(rows []syncRow) []syncRow {
 	var kept []syncRow
 	for _, row := range rows {
 		if keepVerificationRow(row) {
 			kept = append(kept, row)
 		}
 	}
-	return kept, nil
+	return kept
 }
 
 func (j *syncJournal) spillCheckpointRows(cp *syncPhaseCheckpoint, budget int) error {
@@ -272,10 +272,7 @@ func (j *syncJournal) checkpointVerificationBudget(budget int) error {
 	}
 	cp := *j.checkpoint
 	var err error
-	cp.Rows, err = verificationCheckpointRows(j.rows)
-	if err != nil {
-		return err
-	}
+	cp.Rows = verificationCheckpointRows(j.rows)
 	cp.Progress = j.progress
 	cp.Offset, err = j.file.Seek(0, io.SeekCurrent)
 	if err != nil {

@@ -15,6 +15,9 @@ import (
 )
 
 func TestTransferFlushesPendingCacheBeforeExport(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	path, cfg := sharedAppConfig(t)
 	cfg.Cache.WriteoutMinPoints, cfg.Cache.WriteoutMaxDelay = 1000, Duration{time.Hour}
 	writeSharedConfig(t, path, cfg)

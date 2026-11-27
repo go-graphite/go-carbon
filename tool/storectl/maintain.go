@@ -3,6 +3,8 @@ package main
 import (
 	"flag"
 	"fmt"
+	"os"
+
 	"github.com/go-graphite/go-carbon/internal/storemaint/anchors"
 	"github.com/go-graphite/go-carbon/internal/storemaint/coldpack"
 	"github.com/go-graphite/go-carbon/internal/storemaint/convert"
@@ -10,7 +12,6 @@ import (
 	"github.com/go-graphite/go-carbon/internal/storemaint/migration"
 	"github.com/go-graphite/go-carbon/internal/storemaint/prune"
 	"github.com/go-graphite/go-carbon/internal/storemaint/reclaim"
-	"os"
 )
 
 func maintain(args []string) error {

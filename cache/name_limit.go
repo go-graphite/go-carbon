@@ -25,6 +25,10 @@ func (c *Cache) rejectNameTooLong(p *points.Points) {
 		zap.String("name_prefix", p.Metric[:200]), zap.Uint64("rejected_points_total", c.stat.nameTooLong.Load()))
 }
 
+// AddNameTooLongRejected counts points another intake (v2) refused by the same
+// name limits, so receiver_name_too_long_rejected_points_total covers both.
+func (c *Cache) AddNameTooLongRejected(n uint64) { c.stat.nameTooLong.Add(n) }
+
 // NameTooLongRejectedPoints returns points refused at intake because their
 // name exceeds points.MaxMetricNameBytes.
 func (c *Cache) NameTooLongRejectedPoints() uint64 { return c.stat.nameTooLong.Load() }

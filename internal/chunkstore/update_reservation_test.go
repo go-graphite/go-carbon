@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -71,7 +72,7 @@ func TestUpdateReservationReleasesCollidingStripe(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 			defer cancel()
-			if err := db.TryUpdateMany(ctx, codec.name, []Point{{Value: 1}}); err != context.DeadlineExceeded {
+			if err := db.TryUpdateMany(ctx, codec.name, []Point{{Value: 1}}); !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("same-name reservation failed: %v", err)
 			}
 			close(codec.release)

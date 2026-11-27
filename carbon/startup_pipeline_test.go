@@ -3,11 +3,12 @@ package carbon
 import (
 	"bytes"
 	"fmt"
-	"github.com/go-graphite/go-carbon/internal/recovery/capturetest"
 	"math"
 	"math/rand/v2"
 	"strings"
 	"testing"
+
+	"github.com/go-graphite/go-carbon/internal/recovery/capturetest"
 
 	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/internal/recovery"
@@ -45,7 +46,7 @@ func TestStartupHistoryPipelineStoredDifferential(t *testing.T) {
 		var stream cache.RecoveryStream
 		for _, epoch := range epochs {
 			source := stream.Next()
-			apply := func(raw []byte, n int, end, cost int64) error {
+			apply := func(raw []byte, n int, _, cost int64) error {
 				if !core.HasRecoveryCapacityBatch(n, cost) {
 					t.Fatal("unexpected admission block")
 				}
@@ -53,7 +54,7 @@ func TestStartupHistoryPipelineStoredDifferential(t *testing.T) {
 			}
 			var e error
 			if pipeline {
-				_, e = recovery.ReadCaptureFramesPipeline(bytes.NewReader(epoch), 4096, func(raw []byte, n int, stop <-chan struct{}) (int64, error) { return captureMetricBytes(raw, core) }, apply)
+				_, e = recovery.ReadCaptureFramesPipeline(bytes.NewReader(epoch), 4096, func(raw []byte, _ int, _ <-chan struct{}) (int64, error) { return captureMetricBytes(raw, core) }, apply)
 			} else {
 				_, e = recovery.ReadCaptureFramesBuffer(bytes.NewReader(epoch), 4096, func(raw []byte, n int) error {
 					cost, e := captureMetricBytes(raw, core)
@@ -105,8 +106,8 @@ func BenchmarkStartupHistoryPipeline(b *testing.B) {
 			}
 			sh := &startupShard{}
 			sink := &startupSink{admission: core, add: core.AddRecoveredFrom}
-			apply := func(raw []byte, n int, end, cost int64) error { return sh.apply(raw, source, sink) }
-			prepare := func(raw []byte, n int, stop <-chan struct{}) (int64, error) { return captureMetricBytes(raw, core) }
+			apply := func(raw []byte, _ int, _, _ int64) error { return sh.apply(raw, source, sink) }
+			prepare := func(raw []byte, _ int, _ <-chan struct{}) (int64, error) { return captureMetricBytes(raw, core) }
 			b.ReportAllocs()
 			b.SetBytes(int64(len(encoded)))
 			b.ResetTimer()

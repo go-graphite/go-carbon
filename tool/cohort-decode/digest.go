@@ -37,7 +37,7 @@ func pointFrames(input io.Reader, output io.Writer) error {
 	encoder := json.NewEncoder(output)
 	for {
 		raw, err := nativeFrame(input)
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return nil
 		}
 		if err != nil {
@@ -104,7 +104,7 @@ func digestFramesWindows(input io.Reader, output io.Writer, from, until int64, w
 	for {
 		raw, err := nativeFrame(input)
 		if err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				return nil
 			}
 			return err

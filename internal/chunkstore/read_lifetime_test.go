@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -151,7 +152,7 @@ func TestReadParentChannelsBelongToStoreOwner(t *testing.T) {
 		}
 	})
 	s.readCancel()
-	if s.ReadError() != ErrClosed {
+	if !errors.Is(s.ReadError(), ErrClosed) {
 		t.Fatal("shutdown did not close read admission")
 	}
 }

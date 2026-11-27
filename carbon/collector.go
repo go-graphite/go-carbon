@@ -57,6 +57,21 @@ func NewCollector(app *App) *Collector {
 		c.endpoint = MetricEndpointLocal
 	}
 
+	// v2 has no classic persister draining Cache. Feed local telemetry through
+	// its ordinary TCP intake, preserving the same owner/journal boundary.
+	if c.endpoint == MetricEndpointLocal && app.v2 != nil && app.v2.server != nil {
+		host, port, e := net.SplitHostPort(app.v2.server.Addr().String())
+		if e == nil {
+			if ip := net.ParseIP(host); host == "" || ip != nil && ip.IsUnspecified() {
+				host = "127.0.0.1"
+				if ip != nil && ip.To4() == nil {
+					host = "::1"
+				}
+			}
+			endpoint = &url.URL{Scheme: "tcp", Host: net.JoinHostPort(host, port)}
+			c.endpoint = endpoint.String()
+		}
+	}
 	logger = logger.With(zap.String("endpoint", c.endpoint))
 
 	c.startSender(app.Cache.Add, endpoint, logger)
@@ -90,6 +105,13 @@ func NewCollector(app *App) *Collector {
 		RuntimeStat(sendCallback("runtime"))
 	})
 
+	if app.v2 != nil && app.v2.moves != nil {
+		c.stats = append(c.stats, moduleCallback("v2.move", v2MoveStats{app.v2.moves}))
+	}
+	if app.v2 != nil {
+		c.stats = append(c.stats, moduleCallback("v2.catalog", &app.v2.catalog))
+		c.stats = append(c.stats, moduleCallback("v2.intake", app.v2.metrics))
+	}
 	if app.SocketStats != nil {
 		c.stats = append(c.stats, moduleCallback("tcp", app.SocketStats))
 	}

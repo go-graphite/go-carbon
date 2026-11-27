@@ -1,10 +1,9 @@
 package carbon
 
 import (
-	"errors"
+	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -78,15 +77,6 @@ func TestMain(m *testing.M) {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}
-			for _, flag := range []string{"-handoff-protocol", "-input-handoff-protocol", "-shared-store-handoff-protocol", "-store-input-handoff-protocol"} {
-				if err := exec.Command(path, flag).Run(); err != nil {
-					var exit *exec.ExitError
-					if !errors.As(err, &exit) || exit.ExitCode() != 2 {
-						fmt.Fprintln(os.Stderr, err)
-						os.Exit(1)
-					}
-				}
-			}
 		}
 		_ = os.Setenv(testHandoffSuccessorDir, probeDir)
 	}
@@ -108,6 +98,9 @@ func TestMain(m *testing.M) {
 			os.Exit(1)
 		}
 	}
+	// These short storage fixtures mostly wait for disk. Bound both the runner
+	// and process fanout explicitly; m.Run still parses an explicit -parallel.
+	_ = flag.Set("test.parallel", strconv.Itoa(cap(isolatedTestSlots)))
 	code := m.Run()
 	if probeDir != "" {
 		_ = os.RemoveAll(probeDir)

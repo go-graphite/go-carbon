@@ -145,6 +145,9 @@ func TestStartupCaptureContinuesUnderAdmissionPressure(t *testing.T) {
 	}
 }
 func TestStartupCaptureSegmentRetirement(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	s, _ := captureFixture(t)
 	s.policy.segmentBytes = 64
 	admission := &testAdmission{}

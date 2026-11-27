@@ -190,7 +190,7 @@ func (g *syncRedoGuard) report(phase, store string, from, until int64, n int) er
 	event("sync_redo", map[string]any{"level": "error", "phase": phase, "store": store, "from": from, "until": until, "redo_names": n, "reason": reason})
 	return g.j.append(syncRow{Kind: "redo", Phase: phase, Source: store, Names: n})
 }
-func (s *syncer) redoImport(ctx context.Context, source string, names []string, phase string) error {
+func (s *syncer) redoImport(source string, names []string, phase string) error {
 	if s.redo == nil {
 		return nil
 	}

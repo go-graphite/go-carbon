@@ -18,7 +18,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/encoding/protojson"
 
 	"go.uber.org/zap"
 
@@ -552,7 +551,7 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 	// We still keep old json format, because it's painful to deal with math.NaN that can occur in new format.
 	case jsonFormat:
 		contentType = "application/json"
-		b, err = protojson.Marshal(multiv2.ProtoReflect().Interface())
+		b, err = marshalRenderJSON(&multiv2)
 	case protoV2Format:
 		contentType = httpHeaders.ContentTypeCarbonAPIv2PB
 		b, err = multiv2.MarshalVT()

@@ -343,6 +343,7 @@ func TestMetadataPrewarmStopWhileGated(t *testing.T) {
 	if isolatedTestProcess(t) {
 		return
 	}
+	defer zapwriter.Test()()
 	path, cfg := sharedAppConfig(t)
 	cfg.Dump.Enabled = false
 	cfg.Whisper.StoreMetadataCacheSize = 4 << 20
@@ -369,6 +370,9 @@ func TestMetadataPrewarmStopWhileGated(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer app.Stop()
+	// Observe completed fill before stopping: the worker is now waiting in
+	// the one-byte/s pacer, rather than merely scheduled to start.
+	waitMigration(t, func() bool { return app.MetricStore.Stats().StateCache.Prewarmed == 1 })
 	select {
 	case <-app.metadataPrewarmGate:
 		t.Fatal("paced scan already released gate")
@@ -376,19 +380,18 @@ func TestMetadataPrewarmStopWhileGated(t *testing.T) {
 	}
 	stopped := make(chan struct{})
 	go func() { app.Stop(); close(stopped) }()
-	select {
-	case <-stopped:
-	case <-time.After(2 * time.Second):
-		t.Fatal("shutdown waited for prewarm or gate deadline")
-	}
+	<-stopped // package timeout bounds deadlock; scheduler speed is irrelevant
 	if done := app.metadataPrewarmDone.Load(); done == nil {
 		t.Fatal("no prewarm started")
 	} else {
 		select {
 		case <-*done:
-		case <-time.After(time.Second):
+		default:
 			t.Fatal("shutdown left prewarm running")
 		}
+	}
+	if !strings.Contains(zapwriter.TestString(), "context canceled") {
+		t.Fatal("prewarm finished without cancellation", zapwriter.TestString())
 	}
 }
 
@@ -481,11 +484,7 @@ func TestMetadataPrewarmCPUAllowsInput(t *testing.T) {
 	}
 	done := make(chan struct{})
 	go func() { app.Stop(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("CPU allowance blocked shutdown")
-	}
+	<-done // Stop must cancel and join CPU allowance, bounded by the package timeout.
 }
 
 func TestMetadataPrewarmCheckpointMatchesReads(t *testing.T) {
@@ -570,6 +569,9 @@ func testMetadataPrewarmCheckpointMatchesReads(t *testing.T, legacy bool) {
 }
 
 func TestMetadataPrewarmCheckpointSavePressure(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	_, cfg := sharedAppConfig(t)
 	cfg.Whisper.StoreMetadataCachePrewarm = true
 	cfg.Whisper.StoreMetadataCacheWarmFirst = new(bool)

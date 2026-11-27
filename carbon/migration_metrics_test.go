@@ -18,6 +18,9 @@ import (
 )
 
 func TestMigrationCollectorExportsFetchStages(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	now := time.Unix(100000, 0)
 	db := expirationTestDB(t, &now)
 	m := createExpirationMetric(t, db, "timed.fetch")
@@ -168,6 +171,9 @@ func TestMigrationCollectorReportsStoreAndMigration(t *testing.T) {
 }
 
 func TestCollectorReportsStoredPoints(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	now := time.Unix(1700120040, 0)
 	db, err := store.Open(t.TempDir(), store.Options{ExactBlocks: true, TimeBuckets: true, Continuation: &whisperio.ContinuationCodec{}, Now: func() time.Time { return now }})
 	if err != nil {
@@ -272,6 +278,9 @@ func TestCollectorReportsPersisterTimingsAndMemory(t *testing.T) {
 }
 
 func TestMigrationCollectorRelayoutPauseReasons(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	db, err := store.Open(t.TempDir(), store.Options{ExactBlocks: true, TimeBuckets: true, Continuation: &whisperio.ContinuationCodec{}, RelayoutMinFreeBytes: ^uint64(0), RelayoutWorkers: 4, CacheSize: 1 << 20, MemTableSize: 1 << 20})
 	if err != nil {
 		t.Fatal(err)
@@ -338,6 +347,9 @@ func (s canceledTransferMetricStore) UpdateBatch(ctx context.Context, u []store.
 	return s.Store.UpdateBatch(ctx, u, m)
 }
 func TestMigrationCollectorExportsTransferRequeues(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	now := time.Unix(100000, 0)
 	db := expirationTestDB(t, &now)
 	name := "requeued"
@@ -524,6 +536,9 @@ func TestSharedBatchFallbackMetricReasons(t *testing.T) {
 }
 
 func TestMigrationCollectorKeepsStoreMetricsWhileStateBusy(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	db, err := store.Open(t.TempDir(), store.Options{ExactBlocks: true, CacheSize: 1 << 20, MemTableSize: 1 << 20})
 	if err != nil {
 		t.Fatal(err)

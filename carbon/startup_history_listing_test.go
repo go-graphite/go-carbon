@@ -4,12 +4,13 @@ package carbon
 
 import (
 	"fmt"
-	"github.com/go-graphite/go-carbon/internal/recovery/capturetest"
 	"math"
 	"os"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/recovery/capturetest"
 
 	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/internal/handoff"
@@ -29,7 +30,7 @@ func TestStartupHistoryListsEveryLockedOlderPartition(t *testing.T) {
 	app := New("")
 	app.Config = NewConfig()
 	app.startupInput = s
-	encoder, err := zstd.NewWriter(nil)
+	encoder, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithEncoderLevel(zstd.SpeedFastest))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +107,7 @@ func TestStartupHistoryBacklogTracksAppliedFrames(t *testing.T) {
 	app := New("")
 	app.Config = NewConfig()
 	app.startupInput = s
-	encoder, err := zstd.NewWriter(nil)
+	encoder, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithEncoderLevel(zstd.SpeedFastest))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -61,7 +61,8 @@ func (s *syncer) windowSelectionFailure(residuals []syncResidual, persist bool) 
 			kept = append(kept, r)
 		}
 	}
-	s.sum.residual = append(kept, terminal...)
+	kept = append(kept, terminal...)
+	s.sum.residual = kept
 	return &syncWindowSelectionError{Residuals: terminal}
 }
 

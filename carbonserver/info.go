@@ -15,6 +15,7 @@ import (
 
 	"github.com/go-graphite/carbonzipper/zipper/httpHeaders"
 	"github.com/go-graphite/go-carbon/internal/phasecpu"
+	"github.com/go-graphite/go-carbon/internal/v2read"
 	"github.com/go-graphite/go-whisper"
 	protov2 "github.com/go-graphite/protocol/carbonapi_v2_pb"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
@@ -39,6 +40,24 @@ type retentionInfo struct {
 }
 
 func (listener *CarbonserverListener) getMetricInfo(metric string) (metricInfo, error) {
+	if listener.v2Reader != nil {
+		m, masked, err := listener.v2Reader.MetadataWithMask(context.Background(), metric)
+		if err == nil {
+			info := metricInfo{aggregationMethod: titleizeAggrMethod(m.AggregationMethod), xFilesFactor: m.XFilesFactor}
+			for _, a := range m.Archives {
+				info.retentions = append(info.retentions, retentionInfo{int(a.Step), int(a.Points)})
+				info.maxRetention = max(info.maxRetention, a.Step*a.Points)
+			}
+			return info, nil
+		}
+		if !listener.v2Union || masked || !errors.Is(err, v2read.ErrNotFound) {
+			return metricInfo{}, err
+		}
+	}
+	return listener.getClassicMetricInfo(metric)
+}
+
+func (listener *CarbonserverListener) getClassicMetricInfo(metric string) (metricInfo, error) {
 	metricStore := listener.getMetricStore()
 	releaseGuard := func() {}
 	defer func() { releaseGuard() }()

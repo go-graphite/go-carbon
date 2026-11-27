@@ -4,8 +4,9 @@ package capturetest
 
 import (
 	"encoding/binary"
-	"github.com/klauspost/compress/zstd"
 	"hash/crc32"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 const headerSize = 24

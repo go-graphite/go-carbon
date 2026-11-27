@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -140,7 +141,7 @@ func (q *WriteoutQueue) update() {
 	// Clear hints before scanning so concurrent arrivals cannot lose a wake-up.
 	q.wakeAt.Store(0)
 	started := time.Now()
-	queue, next, _ := q.cache.makeQueuePlan(started)
+	queue, next := q.cache.makeQueueAt(started)
 	notBefore := time.Now().Add(100 * time.Millisecond)
 	if queue != nil || !q.cache.settings.Load().(*cacheSettings).batching() {
 		next = notBefore
@@ -215,6 +216,13 @@ QueueLoop:
 
 func (q *WriteoutQueue) Get(abort chan bool) string { // skipcq: RVV-B0001
 	return q.get(abort)
+}
+
+// DebugState reports bounded queue diagnostics without visiting metric names.
+func (q *WriteoutQueue) DebugState() string {
+	q.RLock()
+	defer q.RUnlock()
+	return fmt.Sprintf("planned=%d retained=%d refresh=%s wake=%d", len(q.queue), len(q.retained), q.refreshAt, q.wakeAt.Load())
 }
 
 // TryGet takes an already queued, ready metric without waiting for a rebuild.

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"testing"
 	"time"
@@ -15,6 +16,14 @@ import (
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	whisper "github.com/go-graphite/go-whisper"
 )
+
+var temporaryOOOKey = regexp.MustCompile(`\.ooo\.[0-9a-f]{32}\.tmp$`)
+
+// recordingKey normalizes only the independently randomized temporary identity.
+// Stable paths, operations, values and errors remain part of the comparison.
+func recordingKey(key []byte) []byte {
+	return temporaryOOOKey.ReplaceAll(key, []byte(".ooo.<temporary>.tmp"))
+}
 
 // recordingIO logs every call the codec makes and what it observed.
 type recordingIO struct {
@@ -33,40 +42,40 @@ func (r recordingIO) TimeBuckets() bool {
 
 func (r recordingIO) Get(key []byte) ([]byte, error) {
 	value, err := r.ContinuationIO.Get(key)
-	r.add("get %q = %q %v", key, value, err)
+	r.add("get %q = %q %v", recordingKey(key), value, err)
 	return value, err
 }
 
 func (r recordingIO) Probe(key []byte) ([]byte, error) {
 	value, err := r.ContinuationIO.(store.ContinuationProber).Probe(key)
-	r.add("probe %q = %q %v", key, value, err)
+	r.add("probe %q = %q %v", recordingKey(key), value, err)
 	return value, err
 }
 
 func (r recordingIO) Set(key, value []byte) error {
 	err := r.ContinuationIO.Set(key, value)
-	r.add("set %q %q %v", key, value, err)
+	r.add("set %q %q %v", recordingKey(key), value, err)
 	return err
 }
 
 func (r recordingIO) Delete(key []byte) error {
 	err := r.ContinuationIO.Delete(key)
-	r.add("delete %q %v", key, err)
+	r.add("delete %q %v", recordingKey(key), err)
 	return err
 }
 
 func (r recordingIO) DeletePrefix(prefix []byte) error {
 	err := r.ContinuationIO.DeletePrefix(prefix)
-	r.add("delete prefix %q %v", prefix, err)
+	r.add("delete prefix %q %v", recordingKey(prefix), err)
 	return err
 }
 
 func (r recordingIO) Visit(prefix []byte, visit func([]byte, []byte) error) error {
 	err := r.ContinuationIO.Visit(prefix, func(key, value []byte) error {
-		r.add("visit %q: %q = %q", prefix, key, value)
+		r.add("visit %q: %q = %q", recordingKey(prefix), recordingKey(key), value)
 		return visit(key, value)
 	})
-	r.add("visit %q end %v", prefix, err)
+	r.add("visit %q end %v", recordingKey(prefix), err)
 	return err
 }
 

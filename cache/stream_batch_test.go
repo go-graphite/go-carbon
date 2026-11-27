@@ -3,13 +3,14 @@ package cache
 import (
 	"bytes"
 	"fmt"
-	"github.com/go-graphite/go-carbon/internal/inputlog"
 	"math"
 	"math/rand/v2"
 	"reflect"
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/inputlog"
 
 	"github.com/go-graphite/go-carbon/points"
 )

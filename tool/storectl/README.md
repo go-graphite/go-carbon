@@ -1084,6 +1084,77 @@ It does not certify coverage for those names or count them as copied. Exit **2**
 continues to mean incomplete readiness; process, scope and read-back gates still
 apply to every other name. Keep both lists with the unit's saved state; resume
 preserves the exceptions rather than repeatedly attempting their failed work.
+# Immutable part staging (experimental)
+
+`storectl sync --parts` transfers complete encoded files from a retained,
+coherent v2 snapshot. It does not decode metric names or values. A format reader
+implements `v2core.PartSnapshotReader`; its lease must cover hard-link creation.
+The command also accepts that reader's trusted local JSON inventory:
+
+```json
+{"Version":1,"Parts":[{"Path":"/scratch/sealed/part.sst"}]}
+```
+
+```sh
+storectl sync --parts --snapshot-source /scratch/parts.json --snapshot-dir /scratch/snapshot-1
+storectl sync --parts --snapshot-dir /scratch/snapshot-1 --part-listen 127.0.0.1:8048
+storectl sync --parts --part-from http://127.0.0.1:8048 --part-target /scratch/replica --part-streams 8
+```
+
+Make a fresh hard-link snapshot from the reader's next committed inventory and
+reuse the target directory. Only new content-addressed part IDs are downloaded.
+Restart the same receiver command after interruption: completed files are
+checksum-verified locally and skipped; at most one unfinished file per stream
+needs retransmission. The OS target lock releases even after SIGKILL. Files are
+SHA256-verified and fsynced before rename and directory sync. The snapshot manifest
+is published last. Corrupt completed files fail loudly. Target-only files remain.
+
+This mode stages parts; it does not install them into a live engine or declare
+placement coverage, tail catch-up, target fencing or READY. The format owner must
+include catalogue, policies, tombstones and frontiers in its coherent inventory.
+Never pass a scan of an active database directory as an inventory. Hard links
+require the snapshot and original parts to share a filesystem and retain disk
+space until the snapshot is deleted.
+
+The standalone HTTP server is for trusted fixtures. Binding outside loopback
+requires both `--part-allow-http` and `--part-token-file` (at least 32 characters).
+Clients must explicitly opt into unencrypted cross-host fixture traffic with
+`--part-allow-http`; production transport requires an authenticated HTTPS endpoint.
+Keep tokens in private files and supply the same file to sender and receiver.
+
+A retained canonical `v2part.Manifest` can supply the file inventory directly:
+
+```sh
+storectl sync --parts --portable-manifest /owned/retained/manifest.json \
+  --snapshot-dir /owned/new-hardlink-snapshot
+```
+
+Its immutable data files must be named `<descriptor-SHA256>.sst` beside the
+manifest and retained until snapshot linking completes. The adapter validates
+canonical descriptors and uses their size/checksum without decoding names.
+The manifest itself is pinned and copied as another checksum-addressed object,
+preserving original logical scopes, policies and frontier assertions. Subsequent
+transfers use the existing `--snapshot-dir` / `--part-from` interface and resume
+by whole-file checksums. This stages portable files; external authority files,
+retention leases, authenticated live installation and complete coverage remain
+the retained snapshot owner's responsibility.
+
+For qualification, time snapshot creation separately from transfer: snapshot
+creation reads and hashes every retained file before publishing hard links.
+The receiver's JSON `Bytes` counts newly downloaded parts, `Skipped` counts
+locally revalidated parts, and `GBps` is decimal GB/s over the entire receive
+operation, including checksum verification, file syncs and manifest publication.
+A zero-payload resume still reads completed target files to validate their hashes.
+
+Measure loopback before cross-host transfer using the same retained inventory.
+Record the stream count, elapsed time, process CPU, physical disk and NIC byte
+deltas, cache state and concurrent workload for each run. Loopback throughput
+cannot establish physical NIC capacity. Evict only owned fixture files when
+qualifying cold reads; never clear the host's shared page cache. For an abrupt
+resume check, record completed IDs while a different part is in flight, SIGKILL
+only the fixture receiver, then repeat its exact command and target directory.
+The resumed result must skip every recorded verified ID; unfinished files may
+restart from their beginning. Repeat once more to confirm zero payload.
 
 ### Widen final readiness without changing a saved copy
 

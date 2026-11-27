@@ -271,6 +271,15 @@ func (c *syncCommand) policy(streams int) *effectiveSyncPolicy {
 }
 
 func SyncMain(ctx context.Context, args []string) error {
+	err := syncMain(ctx, args)
+	if errors.Is(err, ErrSyncResidual) && !errors.Is(err, ErrSyncQuarantined) {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(exitSyncResidual)
+	}
+	return err
+}
+
+func syncMain(ctx context.Context, args []string) error {
 	c, err := parseSyncCommand(args)
 	if err != nil {
 		return err
@@ -386,11 +395,9 @@ func SyncMain(ctx context.Context, args []string) error {
 			}
 			if host == c.sync.to {
 				target = status
-			} else {
-				if status.MaxTransfers > 0 {
-					if sourceCapacity == 0 || status.MaxTransfers < sourceCapacity {
-						sourceCapacity = status.MaxTransfers
-					}
+			} else if status.MaxTransfers > 0 {
+				if sourceCapacity == 0 || status.MaxTransfers < sourceCapacity {
+					sourceCapacity = status.MaxTransfers
 				}
 			}
 		}
@@ -432,13 +439,6 @@ func SyncMain(ctx context.Context, args []string) error {
 		}
 	}
 	event("sync_io", map[string]any{"timings": backend.syncTimings()})
-	if errors.Is(err, ErrSyncQuarantined) {
-		return err
-	}
-	if errors.Is(err, ErrSyncResidual) {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(exitSyncResidual)
-	}
 	return err
 }
 

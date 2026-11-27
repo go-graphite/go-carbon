@@ -217,29 +217,30 @@ func (s *Store) configureIncrementalSource(fs vfs.FS, dir, source string, identi
 
 // Completed stores keep the destination's ownership marker and source path binding,
 // but source inode/token checks no longer serve a purpose once originals are retired.
-func checkIncrementalMarkerForMode(fs vfs.FS, dir, source string, identify func(vfs.FS, string) (incrementalIdentity, error), complete bool) (bool, error) {
+func checkIncrementalMarkerForMode(fs vfs.FS, dir, source string, identify func(vfs.FS, string) (incrementalIdentity, error), complete bool) error {
 	if !complete {
-		return checkIncrementalMarker(fs, dir, source, identify)
+		_, err := checkIncrementalMarker(fs, dir, source, identify)
+		return err
 	}
 	if source == "" {
-		return false, errors.New("completed incremental migration requires a source binding")
+		return errors.New("completed incremental migration requires a source binding")
 	}
 	data, err := readStoreMarker(fs, dir, incrementalMarker)
 	if err != nil {
-		return false, err
+		return err
 	}
 	parts := strings.Split(data, "\n")
 	if len(parts) != 3 || (parts[0]+"\n" != incrementalMarkerVersion && parts[0]+"\n" != incrementalMarkerLegacy) || parts[1] != source || parts[2] == "" {
-		return false, fmt.Errorf("%w: completed migration has an invalid destination source binding", ErrFormat)
+		return fmt.Errorf("%w: completed migration has an invalid destination source binding", ErrFormat)
 	}
-	return false, nil
+	return nil
 }
 
 func (s *Store) configureIncrementalSourceForMode(fs vfs.FS, dir, source string, identify func(vfs.FS, string) (incrementalIdentity, error), complete bool) error {
 	if !complete {
 		return s.configureIncrementalSource(fs, dir, source, identify)
 	}
-	if _, err := checkIncrementalMarkerForMode(fs, dir, source, identify, true); err != nil {
+	if err := checkIncrementalMarkerForMode(fs, dir, source, identify, true); err != nil {
 		return err
 	}
 	s.incrementalSource = source

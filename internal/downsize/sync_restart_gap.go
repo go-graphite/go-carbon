@@ -74,21 +74,24 @@ func seedReadyRecoveryCatalog(ctx context.Context, original, recovery syncOption
 		if !header && row.Kind != "header" {
 			return errors.New("restart catalog journal has no header")
 		}
-		if row.Kind == "header" {
+		switch {
+		case row.Kind == "header":
 			header = true
 			if row.Identity != identity {
 				return errors.New("restart catalog scope changed")
 			}
-		} else if row.Kind == "discover_checkpoint" {
+		case row.Kind == "discover_checkpoint":
 			fixedInventory = row.Discovery != nil && row.Discovery.Cursors != nil && (row.Discovery.Cursors["@names"] != "" || row.Discovery.Names == 0)
 			if row.Discovery != nil {
 				catalogBytes, catalogNames = row.Discovery.UnionBytes, row.Discovery.Names
 			}
-		} else if row.Kind == "discovered" {
+		case row.Kind == "discovered":
 			discovered = row
-			break
-		} else if row.Kind != "discover_checkpoint" && row.Kind != "phase-position" && row.Kind != "phase-progress" {
+		case row.Kind != "phase-position" && row.Kind != "phase-progress":
 			return errors.New("restart catalog journal has no discovery boundary")
+		}
+		if row.Kind == "discovered" {
+			break
 		}
 	}
 	if !fixedInventory {

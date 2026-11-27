@@ -259,6 +259,14 @@ func (b *syncLiveBackend) wait(ctx context.Context, what, store string, call fun
 	}
 }
 
+// EmptyTarget proves global emptiness with a single native catalogue key. It
+// never walks the catalogue or reads history. Backends without this bounded
+// capability retain the explicit-name metadata path.
+func (b *syncLiveBackend) EmptyTarget(ctx context.Context, store string) (bool, error) {
+	page, err := b.List(ctx, store, "", "", 1)
+	return len(page) == 0, err
+}
+
 func (b *syncLiveBackend) List(ctx context.Context, store, prefix, after string, limit int) ([]string, error) {
 	if learned := b.listLimit.Load(); learned > 0 {
 		limit = min(limit, int(learned))
@@ -318,7 +326,8 @@ func (b *syncLiveBackend) postInfo(ctx context.Context, base string, body []byte
 	data, err := b.post(ctx, base+"/info/?format=carbonapi_v3_pb&allowPartial=1", body)
 	var h *syncHTTPError
 	if errors.As(err, &h) && h.status == http.StatusBadRequest && h.body == "Bad request (unsupported format)" {
-		return nil, fmt.Errorf("info body read failed (%v): %w", err, io.ErrUnexpectedEOF)
+		// Keep the HTTP status diagnostic-only; wrapping it changes retry policy.
+		return nil, fmt.Errorf("info body read failed (%s): %w", err.Error(), io.ErrUnexpectedEOF)
 	}
 	return data, err
 }

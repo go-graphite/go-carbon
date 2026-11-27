@@ -290,7 +290,7 @@ func TestTransferDeadlineContextPropagation(t *testing.T) {
 	after, stopAfter := context.WithCancel(ctx)
 	defer stopAfter()
 	for _, c := range []context.Context{ctx, before, after} {
-		if c.Err() != context.DeadlineExceeded || context.Cause(c) != context.DeadlineExceeded {
+		if c.Err() != context.DeadlineExceeded || !errors.Is(context.Cause(c), context.DeadlineExceeded) {
 			t.Fatalf("deadline propagation: Err=%v Cause=%v", c.Err(), context.Cause(c))
 		}
 	}

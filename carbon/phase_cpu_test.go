@@ -8,6 +8,9 @@ import (
 )
 
 func TestPhaseCPUConfigAndLifecycle(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	cfg := NewConfig()
 	if phaseCPUInterval(cfg) != 0 {
 		t.Fatal("phase CPU profiling must default off")

@@ -273,6 +273,9 @@ func TestSharedStorageMigrationWorkerLimits(t *testing.T) {
 }
 
 func TestSharedStorageMigrationWorkerLeaseLimits(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	for _, tt := range []struct {
 		maximum, workers, want int
 	}{
@@ -295,6 +298,9 @@ func TestSharedStorageMigrationWorkerLeaseLimits(t *testing.T) {
 }
 
 func TestSharedStorageSyncIntervalConfig(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	for _, tt := range []struct {
 		name string
 		text string
@@ -377,6 +383,9 @@ func TestStoreStatsExposeCacheAndChunkCounters(t *testing.T) {
 }
 
 func TestSharedStoreRejectsIncompleteConversion(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	for _, marker := range []string{"CONVERSION-IN-PROGRESS", "NEEDS-CATCHUP"} {
 		t.Run(marker, func(t *testing.T) {
 			path, cfg := sharedAppConfig(t)

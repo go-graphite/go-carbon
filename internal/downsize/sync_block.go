@@ -3,6 +3,7 @@ package downsize
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -68,7 +69,7 @@ func expandSyncBlock(args []string) ([]string, error) {
 		return nil, fmt.Errorf("block requires target, donors, state and carbonapi_url")
 	}
 	var extra any
-	if err = d.Decode(&extra); err != io.EOF {
+	if err = d.Decode(&extra); !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("block has trailing JSON")
 	}
 	// Scope is authoritative in a block file. Operational limits and opt-outs

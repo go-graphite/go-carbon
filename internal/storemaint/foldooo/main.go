@@ -58,7 +58,7 @@ func Main(args []string) error {
 	defer stop()
 	return run(ctx, client, o)
 }
-func request(ctx context.Context, client *remote.Client, endpoint string, q url.Values, result any) error {
+func request(ctx context.Context, client *remote.Client, q url.Values, result any) error {
 	return client.DoContext(ctx, http.MethodPost, "/v1/maintenance/sidecars?"+q.Encode(), nil, result)
 }
 func saveCheckpoint(path string, c checkpoint) error {
@@ -145,7 +145,7 @@ func run(ctx context.Context, client *remote.Client, o options) error {
 	for c.Phase == "scan" {
 		q := url.Values{"action": {"scan"}, "after": {c.After}, "limit": {strconv.Itoa(o.limit)}, "dry-run": {strconv.FormatBool(o.dry)}}
 		var page store.SidecarPage
-		if err := request(ctx, client, o.endpoint, q, &page); err != nil {
+		if err := request(ctx, client, q, &page); err != nil {
 			return err
 		}
 		if !page.Done && page.After <= c.After {
@@ -178,7 +178,7 @@ func run(ctx context.Context, client *remote.Client, o options) error {
 		q := url.Values{"action": {"fold"}, "after": {c.After}, "limit": {strconv.Itoa(o.limit)}, "rate": {strconv.FormatFloat(o.rate, 'g', -1, 64)}}
 		started := time.Now()
 		var page store.SidecarFoldPage
-		if err := request(ctx, client, o.endpoint, q, &page); err != nil {
+		if err := request(ctx, client, q, &page); err != nil {
 			return err
 		}
 		if !page.Done && page.After <= c.After {

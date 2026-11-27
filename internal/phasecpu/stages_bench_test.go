@@ -3,9 +3,10 @@ package phasecpu
 import (
 	"bytes"
 	"compress/gzip"
-	"google.golang.org/protobuf/encoding/protowire"
 	"io"
 	"testing"
+
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 // A busy one-second window at 100Hz on 100 CPU cores.

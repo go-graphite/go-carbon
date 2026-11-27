@@ -100,7 +100,7 @@ func TestSyncFullSumDifferential2048Names(t *testing.T) {
 				s.masks.Store(n, uint64(1+(i%7)))
 			}
 			var want, got syncRow
-			if err := s.checkFullReference(context.Background(), &want, names, schemas, syncTestNow); err != nil {
+			if err := s.checkFullReference(context.Background(), &want, names, schemas); err != nil {
 				t.Fatal(err)
 			}
 			if err := s.checkFull(context.Background(), &got, names, schemas, syncTestNow); err != nil {
@@ -164,7 +164,7 @@ func TestSyncFullSumDifferentBoundsFallBack(t *testing.T) {
 	var want, got syncRow
 	names := []string{"b.holes"}
 	schemas := map[string][]syncArchive{"b.holes": syncTestSchema}
-	if err := s.checkFullReference(context.Background(), &want, names, schemas, syncTestNow); err != nil {
+	if err := s.checkFullReference(context.Background(), &want, names, schemas); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.checkFull(context.Background(), &got, names, schemas, syncTestNow); err != nil {
@@ -216,7 +216,7 @@ func TestSyncFullLegacySHADifferential(t *testing.T) {
 		schemas[n] = syncTestSchema
 	}
 	var want, got syncRow
-	if err := s.checkFullReference(context.Background(), &want, names, schemas, syncTestNow); err != nil {
+	if err := s.checkFullReference(context.Background(), &want, names, schemas); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.checkFull(context.Background(), &got, names, schemas, syncTestNow); err != nil {
@@ -272,7 +272,7 @@ func TestSyncLegacyTargetReadOnceAfterNegotiation(t *testing.T) {
 	names := []string{"b.holes"}
 	schemas := map[string][]syncArchive{"b.holes": syncTestSchema}
 	var want syncRow
-	if err := s.checkFullReference(context.Background(), &want, names, schemas, syncTestNow); err != nil {
+	if err := s.checkFullReference(context.Background(), &want, names, schemas); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
@@ -302,7 +302,7 @@ func TestSyncFullTargetWithoutDigestEndpoints(t *testing.T) {
 		schemas[n] = syncTestSchema
 	}
 	var want, got syncRow
-	if err := s.checkFullReference(context.Background(), &want, names, schemas, syncTestNow); err != nil {
+	if err := s.checkFullReference(context.Background(), &want, names, schemas); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.checkFull(context.Background(), &got, names, schemas, syncTestNow); err != nil {
@@ -346,7 +346,7 @@ func TestSyncMixedSHADigestBeforePointReads(t *testing.T) {
 				schemas[n] = syncTestSchema
 			}
 			var want, got syncRow
-			if err := s.checkFullReference(context.Background(), &want, names, schemas, syncTestNow); err != nil {
+			if err := s.checkFullReference(context.Background(), &want, names, schemas); err != nil {
 				t.Fatal(err)
 			}
 			b.detail.Store(0)
@@ -404,7 +404,7 @@ func TestSyncFullAbsentLegacySourceDifferential(t *testing.T) {
 				s.masks.Store(n, uint64(7))
 			}
 			var want, got syncRow
-			if err := s.checkFullReference(context.Background(), &want, names, schemas, syncTestNow); err != nil {
+			if err := s.checkFullReference(context.Background(), &want, names, schemas); err != nil {
 				t.Fatal(err)
 			}
 			b.targetReads.Store(0)

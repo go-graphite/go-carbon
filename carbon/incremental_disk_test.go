@@ -204,6 +204,9 @@ func TestIncrementalDiskReleaseDuringRefresh(t *testing.T) {
 }
 
 func TestIncrementalDiskWaitResumesAfterReclaim(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	var available atomic.Uint64
 	available.Store(1000)
 	m := &incrementalStoreMigration{diskFree: func(string) (uint64, error) {

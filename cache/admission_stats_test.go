@@ -149,12 +149,13 @@ func TestAdmissionStatsConcurrentPointOracle(t *testing.T) {
 				for j := range data {
 					data[j] = points.Point{Value: float64(j), Timestamp: int64(i)}
 				}
-				if i%3 == 2 {
+				switch {
+				case i%3 == 2:
 					c.AddRecovered(&points.Points{Metric: name, Data: data})
 					recovered.Add(uint64(n))
-				} else if i%2 == 0 {
+				case i%2 == 0:
 					c.AddPoints(nb, data)
-				} else {
+				default:
 					c.Add(&points.Points{Metric: name, Data: data})
 				}
 				if i%3 != 2 {

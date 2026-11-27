@@ -169,6 +169,9 @@ func TestStoreMaintenanceSIGHUPKeepsStartupGate(t *testing.T) {
 // Drive the service's real load path, including a valid header with corrupt
 // record data, rather than relying only on synthetic result reporting.
 func TestMetadataCheckpointInvalidLoadReportsFailure(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	defer zapwriter.Test()()
 	dir := t.TempDir()
 	opts := store.Options{MetadataCacheSize: 2 << 20, MetadataCacheCheckpoint: true, CacheSize: 1 << 20, MemTableSize: 1 << 20}

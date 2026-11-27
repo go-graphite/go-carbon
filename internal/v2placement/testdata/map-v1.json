@@ -1,0 +1,412 @@
+{
+  "schema": 1,
+  "domain": "example",
+  "map_revision": 1,
+  "predecessor_digest": "",
+  "operation": "bootstrap",
+  "routing": {
+    "name_version": "post-rewrite-bytes-v1",
+    "jump_sizes": [
+      3,
+      4
+    ],
+    "span": 4096,
+    "namespaces": [
+      {
+        "id": "metrics",
+        "prefix": ""
+      }
+    ]
+  },
+  "bootstrap": [
+    {
+      "id": "site-a",
+      "jump_size": 3,
+      "slots": [
+        "a",
+        "b",
+        "c"
+      ]
+    },
+    {
+      "id": "site-b",
+      "jump_size": 4,
+      "slots": [
+        "a",
+        "b",
+        "c",
+        "a"
+      ]
+    }
+  ],
+  "stores": [
+    {
+      "id": "a",
+      "write": "a:2003",
+      "read": "a:8080",
+      "copy": "a:8081"
+    },
+    {
+      "id": "b",
+      "write": "b:2003",
+      "read": "b:8080",
+      "copy": "b:8081"
+    },
+    {
+      "id": "c",
+      "write": "c:2003",
+      "read": "c:8080",
+      "copy": "c:8081"
+    },
+    {
+      "id": "d",
+      "write": "d:2003",
+      "read": "d:8080",
+      "copy": "d:8081"
+    }
+  ],
+  "groups": [
+    {
+      "selector": {
+        "namespace": "metrics",
+        "cell": [
+          0,
+          0
+        ],
+        "start": 0,
+        "end": 4096
+      },
+      "replicas": [
+        {
+          "id": "site-a",
+          "write_epoch": 1,
+          "writer": "a",
+          "read": [
+            "a"
+          ],
+          "copy_sources": [
+            "a"
+          ],
+          "producers": [
+            {
+              "producer": "relay-1/inc-1",
+              "stream": "lane-0"
+            },
+            {
+              "producer": "relay-1/inc-1",
+              "stream": "lane-1"
+            }
+          ],
+          "required": null
+        },
+        {
+          "id": "site-b",
+          "write_epoch": 1,
+          "writer": "a",
+          "read": [
+            "a"
+          ],
+          "copy_sources": [
+            "a"
+          ],
+          "producers": [
+            {
+              "producer": "relay-1/inc-1",
+              "stream": "lane-0"
+            },
+            {
+              "producer": "relay-1/inc-1",
+              "stream": "lane-1"
+            }
+          ],
+          "required": null
+        }
+      ]
+    },
+    {
+      "selector": {
+        "namespace": "metrics",
+        "cell": [
+          0,
+          3
+        ],
+        "start": 0,
+        "end": 4096
+      },
+      "replicas": [
+        {
+          "id": "site-a",
+          "write_epoch": 1,
+          "writer": "a",
+          "read": [
+            "a"
+          ],
+          "copy_sources": [
+            "a"
+          ],
+          "producers": [
+            {
+              "producer": "relay-1/inc-1",
+              "stream": "lane-0"
+            },
+            {
+              "producer": "relay-1/inc-1",
+              "stream": "lane-1"
+            }
+          ],
+          "required": null
+        },
+        {
+          "id": "site-b",
+          "write_epoch": 1,
+          "writer": "a",
+          "read": [
+            "a"
+          ],
+          "copy_sources": [
+            "a"
+          ],
+          "producers": [
+            {
+              "producer": "relay-1/inc-1",
+              "stream": "lane-0"
+            },
+            {
+              "producer": "relay-1/inc-1",
+              "stream": "lane-1"
+            }
+          ],
+          "required": null
+        }
+      ]
+    },
+    {
+      "selector": {
+        "namespace": "metrics",
+        "cell": [
+          1,
+          1
+        ],
+        "start": 0,
+        "end": 4096
+      },
+      "replicas": [
+        {
+          "id": "site-a",
+          "write_epoch": 1,
+          "writer": "b",
+          "read": [
+            "b"
+          ],
+          "copy_sources": [
+            "b"
+          ],
+          "producers": [
+            {
+              "producer": "relay-1/inc-1",
+              "stream": "lane-0"
+            },
+            {
+              "producer": "relay-1/inc-1",
+              "stream": "lane-1"
+            }
+          ],
+          "required": null
+        },
+        {
+          "id": "site-b",
+          "write_epoch": 1,
+          "writer": "b",
+          "read": [
+            "b"
+          ],
+          "copy_sources": [
+            "b"
+          ],
+          "producers": [
+            {
+              "producer": "relay-1/inc-1",
+              "stream": "lane-0"
+            },
+            {
+              "producer": "relay-1/inc-1",
+              "stream": "lane-1"
+            }
+          ],
+          "required": null
+        }
+      ]
+    },
+    {
+      "selector": {
+        "namespace": "metrics",
+        "cell": [
+          1,
+          3
+        ],
+        "start": 0,
+        "end": 4096
+      },
+      "replicas": [
+        {
+          "id": "site-a",
+          "write_epoch": 1,
+          "writer": "b",
+          "read": [
+            "b"
+          ],
+          "copy_sources": [
+            "b"
+          ],
+          "producers": [
+            {
+              "producer": "relay-1/inc-1",
+              "stream": "lane-0"
+            },
+            {
+              "producer": "relay-1/inc-1",
+              "stream": "lane-1"
+            }
+          ],
+          "required": null
+        },
+        {
+          "id": "site-b",
+          "write_epoch": 1,
+          "writer": "a",
+          "read": [
+            "a"
+          ],
+          "copy_sources": [
+            "a"
+          ],
+          "producers": [
+            {
+              "producer": "relay-1/inc-1",
+              "stream": "lane-0"
+            },
+            {
+              "producer": "relay-1/inc-1",
+              "stream": "lane-1"
+            }
+          ],
+          "required": null
+        }
+      ]
+    },
+    {
+      "selector": {
+        "namespace": "metrics",
+        "cell": [
+          2,
+          2
+        ],
+        "start": 0,
+        "end": 4096
+      },
+      "replicas": [
+        {
+          "id": "site-a",
+          "write_epoch": 1,
+          "writer": "c",
+          "read": [
+            "c"
+          ],
+          "copy_sources": [
+            "c"
+          ],
+          "producers": [
+            {
+              "producer": "relay-1/inc-1",
+              "stream": "lane-0"
+            },
+            {
+              "producer": "relay-1/inc-1",
+              "stream": "lane-1"
+            }
+          ],
+          "required": null
+        },
+        {
+          "id": "site-b",
+          "write_epoch": 1,
+          "writer": "c",
+          "read": [
+            "c"
+          ],
+          "copy_sources": [
+            "c"
+          ],
+          "producers": [
+            {
+              "producer": "relay-1/inc-1",
+              "stream": "lane-0"
+            },
+            {
+              "producer": "relay-1/inc-1",
+              "stream": "lane-1"
+            }
+          ],
+          "required": null
+        }
+      ]
+    },
+    {
+      "selector": {
+        "namespace": "metrics",
+        "cell": [
+          2,
+          3
+        ],
+        "start": 0,
+        "end": 4096
+      },
+      "replicas": [
+        {
+          "id": "site-a",
+          "write_epoch": 1,
+          "writer": "c",
+          "read": [
+            "c"
+          ],
+          "copy_sources": [
+            "c"
+          ],
+          "producers": [
+            {
+              "producer": "relay-1/inc-1",
+              "stream": "lane-0"
+            },
+            {
+              "producer": "relay-1/inc-1",
+              "stream": "lane-1"
+            }
+          ],
+          "required": null
+        },
+        {
+          "id": "site-b",
+          "write_epoch": 1,
+          "writer": "a",
+          "read": [
+            "a"
+          ],
+          "copy_sources": [
+            "a"
+          ],
+          "producers": [
+            {
+              "producer": "relay-1/inc-1",
+              "stream": "lane-0"
+            },
+            {
+              "producer": "relay-1/inc-1",
+              "stream": "lane-1"
+            }
+          ],
+          "required": null
+        }
+      ]
+    }
+  ]
+}

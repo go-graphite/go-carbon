@@ -15,7 +15,7 @@ import (
 
 // Frozen window verifier before target detail reads were restricted to the
 // union of mismatching names. Compare the complete ordered verdict against it.
-func (s *syncer) checkWindowReference(ctx context.Context, row *syncRow, names []string, schemas map[string][]syncArchive, w syncRange) error {
+func (s *syncer) checkWindowReference(ctx context.Context, row *syncRow, names []string, w syncRange) error {
 	if s.isDown(s.o.to) {
 		return fmt.Errorf("target: %w", errSyncStoreDown)
 	}
@@ -199,7 +199,7 @@ func TestSyncWindowSubsetDifferential(t *testing.T) {
 				}
 				w := syncRange{"test", holes[0] - 600, holes[0] + 600}
 				var want, got syncRow
-				if err := s.checkWindowReference(context.Background(), &want, names, nil, w); err != nil {
+				if err := s.checkWindowReference(context.Background(), &want, names, w); err != nil {
 					t.Fatal(err)
 				}
 				if err := s.checkWindow(context.Background(), &got, names, nil, w); err != nil {
@@ -297,7 +297,7 @@ func TestSyncWindowLegacyReads(t *testing.T) {
 		s.masks.Store("a.clean", uint64(1))
 		var want, got syncRow
 		w := syncRange{"test", holes[0] - 600, holes[0] + 600}
-		if err := s.checkWindowReference(context.Background(), &want, []string{"a.clean"}, nil, w); err != nil {
+		if err := s.checkWindowReference(context.Background(), &want, []string{"a.clean"}, w); err != nil {
 			t.Fatal(err)
 		}
 		b.targetNames = nil

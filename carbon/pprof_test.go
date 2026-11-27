@@ -97,3 +97,28 @@ func blockProfile(t *testing.T) string {
 	}
 	return b.String()
 }
+
+// The v2 startup path bypasses classic background workers, which ordinarily
+// apply these process-wide rates. Exercise the real v2 startup, not the setter.
+func TestV2RuntimeProfilingStartup(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
+	previous := runtime.SetMutexProfileFraction(0)
+	defer runtime.SetMutexProfileFraction(previous)
+	defer runtime.SetBlockProfileRate(0)
+	app := v2TestApp(t, t.TempDir())
+	app.Config.Pprof.MutexProfileFraction = 5
+	app.Config.Pprof.BlockProfileRate = 1
+	if err := app.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer app.Stop()
+	if got := runtime.SetMutexProfileFraction(-1); got != 5 {
+		t.Fatalf("v2 startup fraction %d, want 5", got)
+	}
+	profileBlock(t, enabledProfileBlock)
+	if !strings.Contains(blockProfile(t), "enabledProfileBlock") {
+		t.Fatal("v2 startup did not enable block profiling")
+	}
+}

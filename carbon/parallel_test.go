@@ -13,7 +13,7 @@ import (
 
 // Storage integration processes are memory intensive. Bound their fanout even
 // when the test binary inherits a large GOMAXPROCS or -test.parallel setting.
-var isolatedTestSlots = make(chan struct{}, 8)
+var isolatedTestSlots = make(chan struct{}, 6)
 var isolatedTestStorage sync.RWMutex
 
 const isolatedTestCase = "GRAPHITE_TEST_ISOLATED_CASE"
@@ -69,15 +69,12 @@ func isolatedTestProcessMode(t *testing.T, parallel bool) bool {
 		parts[i] = "^" + regexp.QuoteMeta(parts[i]) + "$"
 	}
 	args := []string{"-test.run=" + strings.Join(parts, "/"), "-test.v"}
-	if deadline, ok := t.Deadline(); ok {
-		args = append(args, "-test.timeout="+time.Until(deadline).String())
-	}
 	for _, name := range []string{"test.parallel", "test.short", "test.skip"} {
 		args = append(args, "-"+name+"="+flag.Lookup(name).Value.String())
 	}
 	// The package deadline bounds the process. Individual asynchronous waits
 	// observe their own progress; output volume is not a reliable heartbeat.
-	cmd := exec.CommandContext(t.Context(), os.Args[0], args...)
+	cmd := testCommand(t, args...)
 	cmd.Env = append(os.Environ(), isolatedTestCase+"="+t.Name())
 	// Stream phase and failure output while the child is alive. Buffering it
 	// until Wait returns loses the child's diagnostics if the package expires.
@@ -94,4 +91,15 @@ type testProcessOutput struct{ t *testing.T }
 func (out testProcessOutput) Write(p []byte) (int, error) {
 	out.t.Logf("%s", p)
 	return len(p), nil
+}
+
+// testCommand gives nested crash children the same cancellation and deadlock
+// bound as their test. A separate wall-clock timer can expire during useful
+// disk work, and the default child timeout could outlive its parent.
+func testCommand(t *testing.T, args ...string) *exec.Cmd {
+	t.Helper()
+	if deadline, ok := t.Deadline(); ok {
+		args = append(args, "-test.timeout="+time.Until(deadline).String())
+	}
+	return exec.CommandContext(t.Context(), os.Args[0], args...)
 }

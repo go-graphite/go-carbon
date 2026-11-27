@@ -93,7 +93,7 @@ func TestUnexpectedWhisperFileIsLoud(t *testing.T) {
 		t.Fatal(err)
 	}
 	u := newFileListUpdate(l, nil)
-	if err = u.walkFile(path, info, nil, nil); err != filepath.SkipAll {
+	if err = u.walkFile(path, info, nil, nil); !errors.Is(err, filepath.SkipAll) {
 		t.Fatalf("unexpected file accepted: %v", err)
 	}
 	if atomic.LoadUint64(&l.metrics.UnexpectedWhisperFiles) != 1 || strings.Count(logs.String(), `"level":"error"`) != 1 {

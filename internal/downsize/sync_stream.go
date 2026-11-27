@@ -57,15 +57,14 @@ func (s *syncer) startList(ctx context.Context, store, after string) *syncLister
 		// one name in memory, even for multi-million-name copy inventories.
 		var scope *bufio.Scanner
 		var wanted string
-		advanceScope := func() bool {
+		advanceScope := func() {
 			for scope.Scan() {
 				wanted = strings.TrimSpace(scope.Text())
 				if wanted != "" {
-					return true
+					return
 				}
 			}
 			wanted = ""
-			return false
 		}
 		if s.o.namesFile != "" {
 			file, err := os.Open(s.o.namesFile)
@@ -1007,6 +1006,22 @@ func (s *syncer) startScopedList(ctx context.Context, store, after string) *sync
 	go func() {
 		defer close(l.pages)
 		defer close(l.finished)
+		// An empty destination has nothing to compare. Its authoritative native
+		// catalogue avoids per-name metadata (or history) probes before the bulk
+		// copy. Do not cache this result across discovery/restarts: imports may
+		// have populated the target since an earlier attempt.
+		if probe, ok := s.b.(interface {
+			EmptyTarget(context.Context, string) (bool, error)
+		}); ok && store == s.o.to {
+			empty, err := probe.EmptyTarget(ctx, store)
+			if err != nil {
+				l.errc <- fmt.Errorf("list empty target %s: %w", store, err)
+				return
+			}
+			if empty {
+				return
+			}
+		}
 		f, scan, err := openLines(s.o.namesFile)
 		if err != nil {
 			l.errc <- err

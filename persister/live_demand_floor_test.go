@@ -32,15 +32,16 @@ func TestLiveDemandOrdinaryLimits(t *testing.T) {
 					p.writeStats.shared.updates.Store(500000)
 					p.sampleAutoUpdateRateLocked(s)
 					rate := p.autoUpdate.ordinary
-					if ceiling > 0 {
+					switch {
+					case ceiling > 0:
 						if rate != ceiling {
 							t.Fatalf("live demand did not respect explicit ceiling: %d", rate)
 						}
-					} else if ceiling == -1 && pressure {
+					case ceiling == -1 && pressure:
 						if rate >= 100000 {
 							t.Fatalf("live demand bypassed hard storage pressure: %d", rate)
 						}
-					} else if rate < 103000 {
+					case rate < 103000:
 						t.Fatalf("ordinary live demand was underfunded: %d", rate)
 					}
 					for range 120 {

@@ -2,10 +2,13 @@ package downsize
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -92,6 +95,34 @@ func TestCopyPolicyConflictPreservesArchivesAndTargetPolicy(t *testing.T) {
 			bad.Retentions = []store.Retention{{Step: 10, Count: 121}, {Step: 60, Count: 120}}
 			if _, err := copyWithTargetPolicy(ctx, records[0], bad); err == nil {
 				t.Fatal("accepted retention conflict")
+			}
+		})
+	}
+}
+
+// A failed policy-repair probe must not hide the pull that initiated it.
+func TestCopyPolicyConflictKeepsOriginalError(t *testing.T) {
+	for _, failTarget := range []bool{false, true} {
+		t.Run(fmt.Sprint(failTarget), func(t *testing.T) {
+			original := &apiError{Status: 409, Message: "source requires peer store format 12"}
+			donor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !failTarget {
+					http.Error(w, "donor missing", 404)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if err := store.WriteTransfer2(w, []store.TransferMetric{{Version: store.TransferVersion{Name: "metric"}, Config: store.MetricConfig{Name: "metric", AggregationMethod: store.Average, Retentions: []store.Retention{{Step: 1, Count: 60}}}, Continuation: true}}); err != nil {
+					t.Error(err)
+				}
+			}))
+			defer donor.Close()
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "target missing", 404) }))
+			defer target.Close()
+			m := &mover{client: donor.Client()}
+			var proofs []store.TransferProof
+			_, err := m.copyPolicyConflict(context.Background(), task{Source: donor.URL, Target: target.URL}, "metric", 1<<20, &proofs, original)
+			if !errors.Is(err, original) || !strings.Contains(err.Error(), "404") {
+				t.Fatalf("lost original conflict or probe context: %v", err)
 			}
 		})
 	}

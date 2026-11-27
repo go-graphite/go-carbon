@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+
 	"github.com/go-graphite/go-carbon/internal/inputlog/inventory"
 	"github.com/go-graphite/go-carbon/internal/sealedinventory"
 )

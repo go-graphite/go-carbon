@@ -4,11 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"github.com/cockroachdb/pebble/vfs"
 	"math"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/cockroachdb/pebble/vfs"
 )
 
 // Mixed ranges must persist the same healthy points as the old single-name

@@ -272,7 +272,8 @@ func (b binding) validate(p proof, current map[string]root) ([]change, string, e
 		recorded := parts[2]
 		source := current["source"]
 		var wanted string
-		if strings.HasPrefix(recorded, "token:") {
+		switch {
+		case strings.HasPrefix(recorded, "token:"):
 			token, err := readRegular(filepath.Join(source.Path, ".go-carbon-migration-source"))
 			if err != nil {
 				return nil, "", err
@@ -281,12 +282,12 @@ func (b binding) validate(p proof, current map[string]root) ([]change, string, e
 				return nil, "", errors.New("invalid source identity token")
 			}
 			wanted = "token:" + strings.TrimSuffix(string(token), "\n")
-		} else if strings.HasPrefix(recorded, "birth:") {
+		case strings.HasPrefix(recorded, "birth:"):
 			wanted, err = b.birth(source.Path, source)
 			if err != nil {
 				return nil, "", err
 			}
-		} else {
+		default:
 			return nil, "", errors.New("unsupported stable source identity")
 		}
 		if wanted != recorded {

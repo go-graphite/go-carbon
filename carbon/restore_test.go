@@ -104,6 +104,9 @@ func TestRestore(t *testing.T) {
 // first, each dump before its input file, and removes them. It needs no
 // checkpoint index: this is the restore after a crash.
 func TestRestoreCompactAndLegacyGenerations(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	root := t.TempDir()
 	w := func(fn string, body []byte) {
 		if err := os.WriteFile(path.Join(root, fn), body, 0600); err != nil {

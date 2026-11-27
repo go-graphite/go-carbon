@@ -100,6 +100,9 @@ func TestStartupCaptureSubmissionAllocations(t *testing.T) {
 // Both the blocked frame and the following correction must be acknowledged
 // while the cache is blocked, then apply in their original same-timestamp FIFO.
 func TestStartupCaptureLiveApplyCannotBlockAppend(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	s, _ := captureFixture(t)
 	core := cache.New()
 	admission := &testAdmission{}

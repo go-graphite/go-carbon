@@ -823,11 +823,12 @@ func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, nam
 		if e != nil {
 			return syncCopyResult{}, e
 		}
-		if skip {
+		switch {
+		case skip:
 			resolved = append(resolved, syncSkip{n, "quarantined_or_policy_skipped"})
-		} else if excluded[n] {
+		case excluded[n]:
 			resolved = append(resolved, syncSkip{n, "expected_absent_target_expiration"})
-		} else {
+		default:
 			selected = append(selected, n)
 		}
 	}
@@ -859,7 +860,7 @@ func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, nam
 	if err != nil {
 		return syncCopyResult{}, err
 	}
-	if err := s.redoImport(ctx, source, names, phase); err != nil {
+	if err := s.redoImport(source, names, phase); err != nil {
 		return syncCopyResult{}, err
 	}
 	event("sync_copy", map[string]any{"phase": phase, "round": round, "source": source, "names": len(names), "journal": journal})

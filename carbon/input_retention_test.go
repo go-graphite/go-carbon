@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -29,6 +30,10 @@ func TestStoreInputRetentionExpiresAndExits(t *testing.T) {
 		defer cancel()
 		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestStoreInputRetentionExpiresAndExits$", "-test.v")
 		cmd.Env = append(os.Environ(), childEnv+"=1")
+		// A hung child dumps its goroutines instead of dying silently, so a
+		// timeout shows where it waits.
+		cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGQUIT) }
+		cmd.WaitDelay = 2 * time.Second
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("predecessor failed to exit: %v\n%s", err, out)

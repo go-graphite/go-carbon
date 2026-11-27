@@ -28,8 +28,10 @@ package whisper
 // sidecar precedence or wait for the caller's compaction schedule.
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"sort"
@@ -179,6 +181,16 @@ func (whisper *Whisper) openOOO(create bool) (*Whisper, error) {
 	sidecar, err := OpenWithOptions(path, opts)
 	switch {
 	case err == nil:
+		// Old writers could publish metadata before extending the sparse file.
+		// Validate the opened handle, not the pathname, before caching it.
+		var last [1]byte
+		if _, err := sidecar.file.ReadAt(last[:], int64(sidecar.Size()-1)); err != nil {
+			sidecar.Close()
+			if errors.Is(err, io.EOF) {
+				err = io.ErrUnexpectedEOF
+			}
+			return nil, fmt.Errorf("read out-of-order sidecar: %w", err)
+		}
 		if cerr := whisper.checkOOOCompatible(sidecar); cerr != nil {
 			sidecar.Close()
 			whisper.markOOOBroken(cerr)
@@ -191,22 +203,42 @@ func (whisper *Whisper) openOOO(create bool) (*Whisper, error) {
 		return nil, nil
 	}
 
+	// A sidecar is visible to independent readers as soon as its name exists.
+	// Initialize it under a private name and publish only the complete file.
+	// Writers to one metric must still be serialized by the caller.
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return nil, err
+	}
+	tmp := auxiliaryPath(path, fmt.Sprintf(".%x.tmp", nonce))
+	defer whisper.removeStorageFile(tmp)
+	tmpOpts := *opts
+	// The main file's writer owns serialization until publication. Acquire the
+	// stable sidecar path lock when reopening the published file below.
+	tmpOpts.FLock = false
 	sidecar, err = CreateWithOptions(
-		path,
+		tmp,
 		NewRetentionsNoPointer(whisper.Retentions()),
 		whisper.aggregationMethod,
 		whisper.xFilesFactor,
-		opts,
+		&tmpOpts,
 	)
-	if errors.Is(err, os.ErrExist) {
-		// Someone created it between our open and our create. Note that
-		// CreateWithOptions stats and then creates rather than using O_EXCL, so
-		// this catches the sequential case only; two writers racing on the same
-		// metric is already outside what this package serialises.
-		return OpenWithOptions(path, opts)
+	if err != nil {
+		return nil, err
 	}
-
-	return sidecar, err
+	if file, ok := sidecar.file.(interface{ Sync() error }); ok {
+		if err := file.Sync(); err != nil {
+			sidecar.Close()
+			return nil, err
+		}
+	}
+	if err := sidecar.Close(); err != nil {
+		return nil, err
+	}
+	if err := whisper.renameStorageFile(tmp, path); err != nil {
+		return nil, err
+	}
+	return OpenWithOptions(path, opts)
 }
 
 // oooSidecar returns the sidecar handle, opening it on first use and caching it
@@ -360,7 +392,10 @@ func (whisper *Whisper) mergeOutOfOrderValues(archiveIndex, fromTime, untilTime 
 		// Fetch represents both an empty slot and an explicit NaN as NaN.
 		// Inspect timestamps so a NaN correction still replaces a main value.
 		archive := sidecar.archives[0]
-		base := sidecar.getBaseInterval(archive)
+		base, err := sidecar.readBaseInterval(archive)
+		if err != nil {
+			return fmt.Errorf("read out-of-order base interval: %w", err)
+		}
 		if len(values) == 0 || base == 0 {
 			return nil
 		}
@@ -1003,7 +1038,10 @@ func readArchivePointsInRange(w *Whisper, index, from, until int) ([]dataPoint, 
 	}
 	offset, remaining := archive.Offset(), archive.Size()
 	if from >= 0 && until-from < archive.MaxRetention()-archive.secondsPerPoint {
-		base := w.getBaseInterval(archive)
+		base, err := w.readBaseInterval(archive)
+		if err != nil {
+			return nil, err
+		}
 		if base == 0 {
 			return nil, nil
 		}

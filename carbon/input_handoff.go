@@ -116,7 +116,10 @@ func (app *App) startInputHandover(path string, divert *switchWriter, logger *za
 	h := &inputHandover{receivers: app.Receivers, flushTraces: app.FlushTraces, logger: logger, started: time.Now(), tail: tail, path: path, unlock: unlock}
 	app.Receivers = nil
 	// Bounds the tail until the successor is released too (see released).
+	// Publish the timer before its callback can read it in stop.
+	h.mu.Lock()
 	h.timer = time.AfterFunc(inputHandoffTimeout, func() { h.stop("successor did not take input in time") })
+	h.mu.Unlock()
 	divert.Switch(h.write)
 	logger.Info("input tail started", zap.String("filename", path))
 	return h, nil

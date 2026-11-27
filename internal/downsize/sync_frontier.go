@@ -106,7 +106,8 @@ func (s *syncer) openFrontier(ctx context.Context) error {
 	f.scope.Now = s.o.now().Unix()
 	path := filepath.Join(s.o.state, "verification-scope.json")
 	data, err := os.ReadFile(path)
-	if err == nil {
+	switch {
+	case err == nil:
 		expected := f.scope
 		if err = json.Unmarshal(data, &f.scope); err != nil {
 			return err
@@ -114,11 +115,11 @@ func (s *syncer) openFrontier(ctx context.Context) error {
 		if f.scope.Identity != expected.Identity || f.scope.Settle != expected.Settle || f.scope.Now <= 0 || f.scope.Now > expected.Now {
 			return errors.New("verification scope changed; use a fresh state directory")
 		}
-	} else if errors.Is(err, os.ErrNotExist) {
+	case errors.Is(err, os.ErrNotExist):
 		if err = atomicStateJSON(path, f.scope); err != nil {
 			return err
 		}
-	} else {
+	default:
 		return err
 	}
 	data, _ = json.Marshal(f.scope)
