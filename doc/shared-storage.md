@@ -187,6 +187,17 @@ DELETE and offloaded copying. Fill preserves existing destination values and
 rejects different retention/aggregation/XFF policies with HTTP 409. Replacement
 publishes a complete archive generation atomically.
 
+`POST /v1/delete` deletes up to 512 metrics in one atomic commit, the batch
+expiration uses, instead of one request and one commit per metric. The body is
+`{"metrics":[{"name":"a.b","version":"..."}]}`; `version` is optional and
+checked like `DELETE /metrics/{name}?version=`. The reply lists every name in
+request order with the status a single DELETE returns: 200, 403 without a
+`delete` grant for that name, 404, 409 for a version or concurrent-write
+conflict, or 500. It counts as a transfer against `max-transfers` and answers
+HTTP 429 with `Retry-After` under the pressure that pauses transfers: a write
+stall, L0 near stop-writes or `transfer-max-compaction-debt`. Older binaries
+answer 404 for the path, so clients fall back to per-metric DELETE.
+
 JWT tokens use the existing `X-Buckyd-Authorization` header, HMAC shared secret,
 namespace patterns and `read`, `update`, `replace`, `delete` operation grants.
 An empty secret-file setting disables authentication, matching standalone

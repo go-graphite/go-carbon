@@ -568,6 +568,7 @@ func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", s.list)
 	mux.HandleFunc("/metrics/", s.metric)
+	mux.HandleFunc(deleteBatchEndpoint, s.deleteBatch)
 	mux.HandleFunc("/hashring", s.hashring)
 	mux.HandleFunc(storecopy.Endpoint, s.copyHandler)
 	mux.HandleFunc(storecopy.Endpoint+"/", s.copyHandler)
@@ -645,6 +646,11 @@ func (s *Service) allowed(metric, op string, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	return claims.allows(metric, op)
+}
+
+// allows checks one metric against already verified claims.
+func (claims *ACL) allows(metric, op string) error {
 	ns := false
 	for _, pattern := range claims.Namespaces {
 		match, e := filepath.Match(pattern, metric)
