@@ -59,6 +59,10 @@ type coreConfig struct {
 	// L0 writes each publication's new applications to an L0 run file before
 	// readers see them (l0.go); restart loads them with LoadL0. Runtime only.
 	L0 bool `json:"-"`
+	// L0Dir, when set, holds each owner's L0 run files in L0Dir/owner-NNN
+	// instead of the owner directory (tmpfs: they need to outlive a kill -9,
+	// not a reboot). Runtime only.
+	L0Dir string `json:"-"`
 }
 
 type coreFrontier struct {

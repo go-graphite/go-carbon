@@ -36,9 +36,11 @@ type v2Config struct {
 	SealInterval *Duration `toml:"seal-interval"`
 	SealMaxRows  int       `toml:"seal-max-rows"`
 
-	Enabled         bool   `toml:"enabled"`
-	Mode            string `toml:"mode"`
-	Path            string `toml:"path"`
+	Enabled bool   `toml:"enabled"`
+	Mode    string `toml:"mode"`
+	Path    string `toml:"path"`
+	// L0Dir holds the L0 run files (v2L0Dir); empty selects the default.
+	L0Dir           string `toml:"l0-dir"`
 	Producers       int    `toml:"producers"`
 	Shards          int    `toml:"shards"`
 	ReadBudgetBytes int64  `toml:"read-budget-bytes"`
@@ -62,6 +64,24 @@ type v2Runtime struct {
 
 const v2SteadyGCPercent = 50
 
+// v2L0Dir is where v2 keeps L0 run files. They only need to outlive a kill -9:
+// the seal that covers them unlinks them about one seal interval later, before
+// writeback would reach the disk, and a clean stop seals them all. So by
+// default they live on tmpfs (shm), in a directory named after v2.path, which
+// keeps stores sharing a host apart. Without shm they stay under v2.path.
+func v2L0Dir(c v2Config, shm string) (string, error) {
+	if c.L0Dir == "" {
+		if fi, err := os.Stat(shm); err == nil && fi.IsDir() {
+			return filepath.Join(shm, "go-carbon-v2-l0", c.Path), nil
+		}
+		return "", nil
+	}
+	if !filepath.IsAbs(c.L0Dir) || filepath.Clean(c.L0Dir) == filepath.Clean(c.Path) {
+		return "", errors.New("v2.l0-dir must be absolute and differ from v2.path")
+	}
+	return filepath.Clean(c.L0Dir), nil
+}
+
 // v2L0Drain bounds how long an accepted point waits in its producer before
 // core takes it and writes it to an L0 file at the next publication.
 const v2L0Drain = 100 * time.Millisecond
@@ -80,6 +100,10 @@ func (app *App) startV2() error {
 	}
 	if c.V2.Path == "" || !filepath.IsAbs(c.V2.Path) {
 		return errors.New("v2.path must be absolute")
+	}
+	l0Dir, err := v2L0Dir(c.V2, "/dev/shm")
+	if err != nil {
+		return err
 	}
 	if c.Tcp == nil || c.Udp == nil || c.Pickle == nil {
 		return errors.New("v2 requires receiver settings")
@@ -187,7 +211,7 @@ func (app *App) startV2() error {
 	// v2 keeps no producer journal: core writes L0 run files before each
 	// publication. With no fsync to batch, producers hand rows to core every
 	// 100 ms, so the kill-loss window is about one publication.
-	storeConfig := v2daemon.Config{BaselinePath: c.V2.BaselinePath, Layer: 3, Producers: n, Shards: shards, GroupInterval: v2L0Drain, SealInterval: sealInterval, SealMaxRows: c.V2.SealMaxRows, Hooks: hooks}
+	storeConfig := v2daemon.Config{BaselinePath: c.V2.BaselinePath, Layer: 3, Producers: n, Shards: shards, GroupInterval: v2L0Drain, SealInterval: sealInterval, SealMaxRows: c.V2.SealMaxRows, L0Dir: l0Dir, Hooks: hooks}
 	storeConfig.Prepare = func() error {
 		if err := app.prepareV2Fallback(mode); err != nil {
 			return err

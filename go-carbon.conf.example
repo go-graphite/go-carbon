@@ -1539,6 +1539,13 @@ shards = 0                        # 0: one immutable-part owner per producer
 # accepted input), a power loss up to one seal interval. A store whose journal
 # build did not stop cleanly refuses to open; stop the old build cleanly first.
 seal-interval = "10s"
+# L0 files only need to survive a kill -9, so they default to tmpfs:
+# /dev/shm/go-carbon-v2-l0/<path> (the path keeps stores on one host apart;
+# without /dev/shm they stay under path). They cost memory, not disk writes: at
+# most about two seal intervals of accepted points. A clean stop seals them and
+# removes the directory; a reboot after a kill -9 loses them, as a power loss
+# would on disk. Set an absolute directory to move them elsewhere.
+l0-dir = ""
 seal-max-rows = 131072
 read-budget-bytes = 268435456
 # Seals key parts by a vshard-local ID from the store name dictionary
