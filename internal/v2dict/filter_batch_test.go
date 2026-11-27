@@ -78,6 +78,10 @@ func TestCheckNamesBlockBatch(t *testing.T) {
 	if err := d.Flush(); err != nil {
 		t.Fatal(err)
 	}
+	// Flushes stay L1: per 8 MiB flush of real names an L2 write costs 9.1
+	// ms CPU against 6.0, and a waiting L1 level keeps its Bloom filter in
+	// memory, so a miss costs 32 ns against 36 (TestFlushKindCost). Merge
+	// lanes keep few flushed levels waiting.
 	if d.snap.Load().levels[0].compact {
 		t.Fatal("flush compressed a transient level")
 	}

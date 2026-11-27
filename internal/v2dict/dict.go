@@ -102,8 +102,12 @@ type Dict struct {
 
 	snap    atomic.Pointer[snapshot]
 	flushWG sync.WaitGroup // the background write of a frozen append level
-	merging atomic.Bool
-	mergeMu sync.Mutex // one merge at a time
+	// mergeMu guards busy (the levels running merges consume) and mergers
+	// (running merge goroutines, at most maxMergers): a merge of newer
+	// levels runs beside a long base merge, so flushed levels never pile up.
+	mergeMu sync.Mutex
+	busy    []*level
+	mergers int
 	mergeWG sync.WaitGroup
 
 	pol policyTable // Entry.Policy -> immutable suffix (policy.go)
@@ -982,7 +986,7 @@ func (d *Dict) NextID(group string, vshard uint16) uint32 {
 	return 0
 }
 
-// Close waits for a running merge, flushes nothing (the log holds the
+// Close waits for running merges, flushes nothing (the log holds the
 // append level) and syncs the log.
 func (d *Dict) Close() error {
 	d.flushWG.Wait() // the frozen level's file, which also closes its log
