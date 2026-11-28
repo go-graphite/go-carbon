@@ -374,7 +374,13 @@ func SyncMain(ctx context.Context, args []string) error {
 	}
 	err = runSyncReadyPrepared(ctx, &c.sync, c.ready, backend, func() error {
 		streams := c.copy.streams
+		// A resumed state saves the resolved global budget as --streams; an
+		// implicit budget is the default request, so per-donor budgets recover
+		// it instead of inheriting the smallest donor's cap.
 		requested := streams
+		if !c.explicit["streams"] {
+			requested = defaultSyncStreams
+		}
 		var sourceCapacity int
 		var target copyStatus
 		sourceStatus := map[string]copyStatus{}
