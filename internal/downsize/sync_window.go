@@ -30,8 +30,31 @@ type syncWindowBackend interface {
 func (s *syncer) windowOnly() bool { return len(s.o.windows) > 0 && !s.o.fullHistory }
 
 func (s *syncer) copyWindows() syncRanges {
+	return s.copyWindowsAt(s.settledHorizon())
+}
+
+// settledHorizon is the newest timestamp whose points the replicas have stopped writing.
+func (s *syncer) settledHorizon() int64 { return s.o.now().Unix() - int64(s.o.settle.Seconds()) }
+
+// settledWindowsCompatible reports whether windows saved by an earlier run of
+// this state are the requested windows clipped at an older settled horizon.
+// The requested windows decide the scope; the horizon only grows while a
+// state runs, so a resume after the windows settled keeps the saved work and
+// copies or verifies the newly settled tail with the current windows.
+func (s *syncer) settledWindowsCompatible(saved syncRanges) bool {
+	current := s.copyWindows()
+	if slices.Equal(saved, current) {
+		return true
+	}
+	if len(saved) == 0 {
+		return false
+	}
+	horizon := saved[len(saved)-1].Until
+	return horizon <= s.settledHorizon() && slices.Equal(saved, s.copyWindowsAt(horizon))
+}
+
+func (s *syncer) copyWindowsAt(horizon int64) syncRanges {
 	var out syncRanges
-	horizon := s.o.now().Unix() - int64(s.o.settle.Seconds())
 	for _, w := range s.o.windows {
 		w.Until = min(w.Until, horizon)
 		if w.From < w.Until {
@@ -54,6 +77,18 @@ func (s *syncer) copyWindows() syncRanges {
 	return merged
 }
 
+// compatibleWindowPolicy accepts a policy saved before the windows settled:
+// the same batch size, and the requested windows clipped at an older horizon.
+func (s *syncer) compatibleWindowPolicy(identity string) bool {
+	var saved []json.RawMessage
+	var batch int
+	var windows syncRanges
+	if json.Unmarshal([]byte(identity), &saved) != nil || len(saved) != 2 || json.Unmarshal(saved[0], &batch) != nil || json.Unmarshal(saved[1], &windows) != nil {
+		return false
+	}
+	return batch == s.o.batch && s.settledWindowsCompatible(windows)
+}
+
 // Scan the existing catalog in bounded batches. Window exports establish actual
 // coverage in every archive; retention metadata alone cannot prove relevance.
 // Copy each batch immediately, rather than waiting for the complete catalog.
@@ -66,7 +101,7 @@ func (s *syncer) copyMissingWindow(ctx context.Context) error {
 	defer f.Close()
 	policy, _ := json.Marshal([]any{s.o.batch, s.copyWindows()})
 	policies := s.j.find(func(r syncRow) bool { return r.Kind == "window-policy" })
-	if len(policies) > 0 && policies[0].Identity != string(policy) {
+	if len(policies) > 0 && policies[0].Identity != string(policy) && !s.compatibleWindowPolicy(policies[0].Identity) {
 		return fmt.Errorf("window copy batch size or settled windows changed; use the original options or a fresh state directory")
 	}
 	if len(policies) == 0 {

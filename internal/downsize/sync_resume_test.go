@@ -202,3 +202,23 @@ func TestSyncResumeReadyInputsPreserveScopeAndGates(t *testing.T) {
 		t.Fatalf("attestation not adopted: %+v %v", attested.ready, err)
 	}
 }
+
+// Batch caps group names into pulls; they never change which names or windows
+// a state copies, so a resume may lower them (for example to avoid 413 splits).
+func TestSyncResumeAcceptsBatchCaps(t *testing.T) {
+	t.Parallel()
+	c, err := parseSyncCommand(syncCLIArgs(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.saveConfig(); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := parseSyncCommand([]string{"--resume", c.sync.state, "--max-batch-bytes", "4194304", "--max-batch-names", "1024"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.copy.maxBytes != 4194304 || resumed.copy.maxNames != 1024 || !reflect.DeepEqual(resumed.sync.from, c.sync.from) || resumed.sync.to != c.sync.to {
+		t.Fatalf("batch caps not applied on resume: bytes %d names %d", resumed.copy.maxBytes, resumed.copy.maxNames)
+	}
+}

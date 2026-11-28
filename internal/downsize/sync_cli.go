@@ -106,6 +106,7 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	flags.IntVar(&c.live.copyStreams, "copy-streams", 0, "deprecated compatibility flag: use --streams for the total budget; a different positive value is rejected")
 	flags.DurationVar(&c.live.hostWait, "host-wait", 30*time.Minute, "busy-store wait budget; restart failures are always retried until cancellation")
 	flags.IntVar(&c.live.copyAttempts, "copy-attempts", 6, "copy engine runs per name list, resuming its journal")
+	flags.StringVar(&c.live.copyEngine, "copy-engine", syncCopyEngineMetric, "metric: metric engine (/v1/transfer/pull, target wins); native: names absent on the target go whole through the native bulk path (/v1/native/pull) when the donor and target both serve it, while names the target holds, failed ranges and stores without the endpoint use the metric engine. The target admits store-native-import-concurrency native pulls at once; may be changed on --resume")
 	if err := flags.Parse(args); err != nil {
 		return c, err
 	}
@@ -150,6 +151,9 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	if c.rate < 0 || c.copy.streams < 0 || c.live.copyStreams < 0 || c.copy.maxBytes < 65536 || c.copy.transferIdle <= 0 || c.copy.maxNames < 1 || c.copy.maxNames > chunkstore.MaxTransferMetrics || c.copy.maxFailures < 0 || c.copy.tick <= 0 || c.copy.maxBackoff < c.copy.tick || c.copy.stallTimeout <= 0 || c.copy.progressInterval <= 0 || c.live.hostWait <= 0 || c.live.copyAttempts < 1 {
 		return c, errors.New("invalid streams, batch limits, retry settings or timeouts")
 	}
+	if c.live.copyEngine != syncCopyEngineNative && c.live.copyEngine != syncCopyEngineMetric {
+		return c, errors.New("--copy-engine accepts metric or native")
+	}
 	if c.copy.engine != "metric" {
 		return c, errors.New("--engine accepts metric; native window mode is selected by --window --no-full-history")
 	}
@@ -179,7 +183,7 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	}
 	native := len(c.sync.windows) > 0 && !c.sync.fullHistory
 	if native {
-		for _, f := range []string{"max-batch-bytes", "copy-streams", "max-batch-names", "debt-guard", "retry-interval", "max-backoff", "stall-timeout", "max-failures", "engine", "copy-attempts"} {
+		for _, f := range []string{"max-batch-bytes", "copy-streams", "max-batch-names", "debt-guard", "retry-interval", "max-backoff", "stall-timeout", "max-failures", "engine", "copy-attempts", "copy-engine"} {
 			if c.explicit[f] {
 				return c, fmt.Errorf("--%s has no effect in native window sync; remove it or remove --no-full-history", f)
 			}
@@ -255,7 +259,7 @@ func readSyncNames(path string) (string, error) {
 }
 
 func (c *syncCommand) policy(streams int) *effectiveSyncPolicy {
-	p := &effectiveSyncPolicy{Engine: "metric", Streams: streams, VerifyStreams: streams, CopyStreams: streams, Scheduling: "serial phases; each uses the total budget", VerifyBatch: c.sync.batch, CopyBatchNames: c.copy.maxNames, CopyBatchBytes: c.copy.maxBytes, Scope: "full-history", Windows: c.sync.windows.String(), Phase: "all", NoCopy: c.sync.noCopy, NoVerify: c.sync.noVerify}
+	p := &effectiveSyncPolicy{Engine: "metric", Streams: streams, VerifyStreams: streams, CopyStreams: streams, Scheduling: "serial phases; each uses the total budget; a donor overlaps up to 4 copy waves within its streams", VerifyBatch: c.sync.batch, CopyBatchNames: c.copy.maxNames, CopyBatchBytes: c.copy.maxBytes, Scope: "full-history", Windows: c.sync.windows.String(), Phase: "all", NoCopy: c.sync.noCopy, NoVerify: c.sync.noVerify}
 	if len(c.sync.windows) > 0 {
 		p.Scope = "windows+full-history"
 		p.SampleEvery = c.sync.sampleEvery
@@ -370,8 +374,16 @@ func SyncMain(ctx context.Context, args []string) error {
 	}
 	err = runSyncReadyPrepared(ctx, &c.sync, c.ready, backend, func() error {
 		streams := c.copy.streams
+		// A resumed state saves the resolved global budget as --streams; an
+		// implicit budget is the default request, so per-donor budgets recover
+		// it instead of inheriting the smallest donor's cap.
+		requested := streams
+		if !c.explicit["streams"] {
+			requested = defaultSyncStreams
+		}
 		var sourceCapacity int
 		var target copyStatus
+		sourceStatus := map[string]copyStatus{}
 		for _, host := range c.live.authOrigins {
 			if capped := streams == 0 || !c.explicit["streams"]; !capped && host != c.sync.to {
 				continue
@@ -387,6 +399,7 @@ func SyncMain(ctx context.Context, args []string) error {
 			if host == c.sync.to {
 				target = status
 			} else {
+				sourceStatus[host] = status
 				if status.MaxTransfers > 0 {
 					if sourceCapacity == 0 || status.MaxTransfers < sourceCapacity {
 						sourceCapacity = status.MaxTransfers
@@ -402,6 +415,21 @@ func SyncMain(ctx context.Context, args []string) error {
 		c.sync.streams = streams
 		c.live.copyStreams = streams
 		c.copy.streams = streams
+		// Each copy stream holds a slot on one donor and the target only, so
+		// a donor's copy budget is min(budget, that donor, target), not the
+		// smallest donor's. An explicit --streams is used as given.
+		c.live.sourceStreams = nil
+		if !c.explicit["streams"] {
+			c.live.sourceStreams = map[string]int{}
+			for host, status := range sourceStatus {
+				budget := defaultCopyStreams(status.MaxTransfers, target.MaxTransfers)
+				if requested > 0 {
+					budget = min(requested, budget)
+				}
+				c.live.sourceStreams[host] = budget
+			}
+			event("copy_source_streams", map[string]any{"streams": c.live.sourceStreams, "verify_streams": streams})
+		}
 		c.sync.policy = c.policy(streams)
 		if c.sync.policy.CopyBatchBytes > 0 && target.MaxBodyBytes > 0 {
 			c.sync.policy.CopyBatchBytes = min(c.sync.policy.CopyBatchBytes, target.MaxBodyBytes)

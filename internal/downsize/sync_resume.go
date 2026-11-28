@@ -60,7 +60,11 @@ func (c *syncCommand) restoreConfig(flags *flag.FlagSet, resume string) error {
 	for name := range c.explicit {
 		switch name {
 		case "resume":
-		case "no-release-proofs", "target-health", "target-health-high", "target-health-low", "max-rounds", "rescan-all", "timeout", "streams", "rate", "cache-threshold", "ready", "carbonapi-url", "period", "gap-ledger-complete", "ready-block", "gapfill-window", "source", "from", "to", "ring", "window", "names":
+		// Batch caps change only how names are grouped into pulls, never which
+		// names or windows are copied: receipts are exact name sets and ranges.
+		case "max-batch-bytes", "max-batch-names":
+			overrides[name] = flags.Lookup(name).Value.String()
+		case "no-release-proofs", "target-health", "target-health-high", "target-health-low", "max-rounds", "rescan-all", "timeout", "streams", "copy-engine", "rate", "cache-threshold", "ready", "carbonapi-url", "period", "gap-ledger-complete", "ready-block", "gapfill-window", "source", "from", "to", "ring", "window", "names":
 			overrides[name] = flags.Lookup(name).Value.String()
 		default:
 			return fmt.Errorf("--resume uses saved configuration: --%s cannot change scope or configuration; operational and READY inputs may override it; donor/target/ring/names/window changes select a preserved child scope", name)
@@ -139,13 +143,15 @@ func (c *syncCommand) captureConfig(flags *flag.FlagSet) {
 	}
 	flags.VisitAll(func(f *flag.Flag) {
 		switch f.Name {
-		case "resume", "from", "allow-fresh-start":
+		// copy-engine is chosen per invocation and never saved, so a state
+		// written by this build still resumes with older builds.
+		case "resume", "from", "allow-fresh-start", "copy-engine":
 			return
 		}
 		c.config.Flags[f.Name] = f.Value.String()
 	})
 	for name, explicit := range c.explicit {
-		if name != "resume" && name != "allow-fresh-start" {
+		if name != "resume" && name != "allow-fresh-start" && name != "copy-engine" {
 			c.config.Explicit[name] = explicit
 		}
 	}

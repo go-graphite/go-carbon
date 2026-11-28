@@ -47,6 +47,12 @@ type copyOptions struct {
 	progressInterval                                 time.Duration
 	debtGuard                                        bool
 	policy                                           *effectiveSyncPolicy
+	// pullSlots, when set, bounds pulls in flight across every copier that
+	// shares it: sync overlaps a donor's waves under one stream budget.
+	pullSlots chan struct{}
+	// sizer, when set, carries the learned bytes per name across copiers of
+	// one donor, so each wave starts from real sizes instead of the default.
+	sizer *batchSizer
 }
 
 const (
@@ -254,6 +260,9 @@ func planFreeCopy(ctx context.Context, o copyOptions) error {
 	progress.resume(o.state, journal.completedNames)
 	defer c.closeCatalogs()
 	c.sizer = &batchSizer{budget: min(o.maxBytes, target.MaxBodyBytes), maxNames: o.maxNames, perName: copyInitialBytesPerName}
+	if o.sizer != nil {
+		c.sizer = o.sizer.bind(min(o.maxBytes, target.MaxBodyBytes), o.maxNames)
+	}
 	event("copy_start", map[string]any{"from": o.froms, "to": o.to, "names": o.names, "prefix": o.prefix, "ring": o.ring, "state": o.state, "streams": o.streams, "batch_bytes": c.sizer.budget, "max_body_bytes": target.MaxBodyBytes, "max_batch_names": o.maxNames, "resumed_ranges": len(journal.ranges), "source_max_transfers": sourceTransfers, "target_max_transfers": target.MaxTransfers, "stall_timeout": o.stallTimeout.String(), "effective": o.policy})
 	sources := make([]copySource, 0, len(o.froms))
 	for _, from := range o.froms {
@@ -390,9 +399,19 @@ func (c *planFreeCopier) run(ctx context.Context, sources []copySource, owner fu
 		go func() {
 			defer wg.Done()
 			for batch := range batches {
+				if c.o.pullSlots != nil {
+					select {
+					case c.o.pullSlots <- struct{}{}:
+					case <-ctx.Done():
+						continue // drain: the producer stops on the same cancellation
+					}
+				}
 				c.progress.inFlight.Add(1)
 				err := c.send(ctx, batch.source, batch.names, false)
 				c.progress.inFlight.Add(-1)
+				if c.o.pullSlots != nil {
+					<-c.o.pullSlots
+				}
 				if err != nil {
 					cancel(err)
 				}
@@ -709,6 +728,7 @@ type batchSizer struct {
 	perName  float64
 	budget   int64
 	maxNames int
+	shared   bool // carried across copiers (sync waves); decays slowly
 }
 
 func (s *batchSizer) names() int {
@@ -724,7 +744,30 @@ func (s *batchSizer) observe(names int, bytes int64) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.perName = 0.6*s.perName + 0.4*float64(bytes)/float64(names)
+	// Rise quickly and fall slowly: an underestimate costs a 413 and a split
+	// (the donor exports the batch up to the budget, then both halves again);
+	// an overestimate costs only a smaller batch.
+	observed := float64(bytes) / float64(names)
+	weight := 0.4
+	if s.shared && observed < s.perName {
+		weight = 0.15
+	}
+	s.perName = (1-weight)*s.perName + weight*observed
+}
+
+// bind adopts the budget of a new copier sharing this sizer. Copiers of one
+// donor and target share a budget; a different one restarts the estimate.
+func (s *batchSizer) bind(budget int64, maxNames int) *batchSizer {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.budget != budget || s.maxNames != maxNames {
+		s.budget, s.maxNames = budget, maxNames
+		if s.perName <= 0 {
+			s.perName = copyInitialBytesPerName
+		}
+	}
+	s.shared = true
+	return s
 }
 
 // tooLarge: names exceeded the budget, so the mean is above budget/names; aim

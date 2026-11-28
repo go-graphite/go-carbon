@@ -485,6 +485,8 @@ func (s *syncer) hasPendingWindowSelections() bool {
 
 // Stream budgets and verification batch boundaries do not invalidate a data
 // proof. Native missing-window selections alone freeze their batching contract.
+// Windows saved before they settled match the requested windows clipped at the
+// older horizon; settling more of the requested period is not a scope change.
 func (s *syncer) compatiblePhaseOptions(options string) bool {
 	var saved, current struct {
 		Settle  int64
@@ -494,9 +496,7 @@ func (s *syncer) compatiblePhaseOptions(options string) bool {
 	if json.Unmarshal([]byte(options), &saved) != nil || json.Unmarshal([]byte(syncCheckpointOptions(s.o)), &current) != nil {
 		return false
 	}
-	a, _ := json.Marshal(saved.Windows)
-	b, _ := json.Marshal(current.Windows)
-	if saved.Settle != current.Settle || string(a) != string(b) {
+	if saved.Settle != current.Settle || !s.settledWindowsCompatible(saved.Windows) {
 		return false
 	}
 	if saved.Batch != current.Batch {
