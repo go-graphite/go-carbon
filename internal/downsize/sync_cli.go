@@ -259,7 +259,7 @@ func readSyncNames(path string) (string, error) {
 }
 
 func (c *syncCommand) policy(streams int) *effectiveSyncPolicy {
-	p := &effectiveSyncPolicy{Engine: "metric", Streams: streams, VerifyStreams: streams, CopyStreams: streams, Scheduling: "serial phases; each uses the total budget", VerifyBatch: c.sync.batch, CopyBatchNames: c.copy.maxNames, CopyBatchBytes: c.copy.maxBytes, Scope: "full-history", Windows: c.sync.windows.String(), Phase: "all", NoCopy: c.sync.noCopy, NoVerify: c.sync.noVerify}
+	p := &effectiveSyncPolicy{Engine: "metric", Streams: streams, VerifyStreams: streams, CopyStreams: streams, Scheduling: "serial phases; each uses the total budget; a donor overlaps up to 4 copy waves within its streams", VerifyBatch: c.sync.batch, CopyBatchNames: c.copy.maxNames, CopyBatchBytes: c.copy.maxBytes, Scope: "full-history", Windows: c.sync.windows.String(), Phase: "all", NoCopy: c.sync.noCopy, NoVerify: c.sync.noVerify}
 	if len(c.sync.windows) > 0 {
 		p.Scope = "windows+full-history"
 		p.SampleEvery = c.sync.sampleEvery

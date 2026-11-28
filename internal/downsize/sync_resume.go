@@ -60,6 +60,10 @@ func (c *syncCommand) restoreConfig(flags *flag.FlagSet, resume string) error {
 	for name := range c.explicit {
 		switch name {
 		case "resume":
+		// Batch caps change only how names are grouped into pulls, never which
+		// names or windows are copied: receipts are exact name sets and ranges.
+		case "max-batch-bytes", "max-batch-names":
+			overrides[name] = flags.Lookup(name).Value.String()
 		case "no-release-proofs", "target-health", "target-health-high", "target-health-low", "max-rounds", "rescan-all", "timeout", "streams", "copy-engine", "rate", "cache-threshold", "ready", "carbonapi-url", "period", "gap-ledger-complete", "ready-block", "gapfill-window", "source", "from", "to", "ring", "window", "names":
 			overrides[name] = flags.Lookup(name).Value.String()
 		default:
