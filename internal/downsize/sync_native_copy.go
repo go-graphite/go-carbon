@@ -39,6 +39,15 @@ const (
 // lost acknowledgement is answered from the target's durable receipt.
 var syncNativeOperation = sha256Hex("storectl sync: native absent-name copy v1")
 
+// syncNativeMergeSession pins donors in merge mode: the export carries the
+// committed history of names the donor is still writing (cache-queued or
+// revised since the pin) instead of deferring them. A plain pin defers every
+// live name, which on a donor still taking writes sent most names back to the
+// metric engine. Sync owns the delta: verification compares every copied name
+// with the donor after --settle and the fill phase copies what is missing,
+// exactly as for the metric engine's point-in-time export.
+const syncNativeMergeSession = "storectl-sync-absent-v1"
+
 func sha256Hex(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
@@ -198,24 +207,29 @@ func (b *syncLiveBackend) nativeCopy(ctx context.Context, source, target string,
 
 // nativeSession pins a donor snapshot for one wave and releases it after.
 func (b *syncLiveBackend) nativeSession(ctx context.Context, source string) (string, func(), error) {
-	var response struct{ ID string }
-	if _, err := b.m.requestAttempt(ctx, source, "/v1/native/source", struct{}{}, &response); err != nil {
+	var response struct{ ID, MergeSession string }
+	if _, err := b.m.requestAttempt(ctx, source, "/v1/native/source", struct{ MergeSession string }{syncNativeMergeSession}, &response); err != nil {
 		return "", nil, err
 	}
-	if len(response.ID) != 32 {
-		return "", nil, errors.New("invalid native source session")
+	if len(response.ID) != 32 || response.MergeSession != syncNativeMergeSession {
+		if len(response.ID) == 32 {
+			b.releaseNativeSession(ctx, source, response.ID)
+		}
+		return "", nil, errors.New("invalid native merge source session")
 	}
-	return response.ID, func() {
-		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), stopCleanupTimeout)
-		defer cancel()
-		request, err := http.NewRequestWithContext(cleanup, http.MethodDelete, source+"/v1/native/source/"+response.ID, nil)
-		if err != nil {
-			return
-		}
-		if response, err := b.m.client.Do(request); err == nil {
-			response.Body.Close()
-		}
-	}, nil
+	return response.ID, func() { b.releaseNativeSession(ctx, source, response.ID) }, nil
+}
+
+func (b *syncLiveBackend) releaseNativeSession(ctx context.Context, source, id string) {
+	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), stopCleanupTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(cleanup, http.MethodDelete, source+"/v1/native/source/"+id, nil)
+	if err != nil {
+		return
+	}
+	if response, err := b.m.client.Do(request); err == nil {
+		response.Body.Close()
+	}
 }
 
 // nativeRange pulls one range. Only infrastructure failures (cancellation,
@@ -226,7 +240,7 @@ func (b *syncLiveBackend) nativeRange(ctx context.Context, j *copyJournal, sourc
 		return 0, err
 	}
 	chunk := names[r[0]:r[1]]
-	request := chunkstore.NativeRange{Operation: syncNativeOperation, Plan: plan, Stream: stream, Source: source, Start: int64(r[0]), End: int64(r[1]), Names: chunk}
+	request := chunkstore.NativeRange{Operation: syncNativeOperation, Plan: plan, Stream: stream, Source: source, Start: int64(r[0]), End: int64(r[1]), Names: chunk, MergeSession: syncNativeMergeSession}
 	identity, namesHash, err := request.Identity()
 	if err != nil {
 		event("sync_native_range_skipped", map[string]any{"level": "warn", "source": source, "first": chunk[0], "names": len(chunk), "error": err.Error()})

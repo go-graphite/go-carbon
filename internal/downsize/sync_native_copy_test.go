@@ -93,6 +93,9 @@ func TestSyncNativeCopyMatchesMetricEngine(t *testing.T) {
 	t.Parallel()
 	donor, metricTarget, nativeTarget := nativeControllerStore(t), nativeControllerStore(t), nativeControllerStore(t)
 	names, present := nativeCopyFixture(t, donor, metricTarget, nativeTarget)
+	// A live donor: every name has queued cache points. A plain native pin
+	// defers all of them; the merge-mode pin must still copy them natively.
+	donor.SetNativePendingCheck(func(string) bool { return true })
 	donorServer := httptest.NewServer(nativeControllerService(t, donor))
 	defer donorServer.Close()
 	counts := map[string]*atomic.Int64{"/v1/native/pull": {}, "/v1/transfer/pull": {}}
