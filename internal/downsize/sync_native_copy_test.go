@@ -94,9 +94,25 @@ func TestSyncNativeCopyMatchesMetricEngine(t *testing.T) {
 	t.Parallel()
 	donor, metricTarget, nativeTarget := nativeControllerStore(t), nativeControllerStore(t), nativeControllerStore(t)
 	names, present := nativeCopyFixture(t, donor, metricTarget, nativeTarget)
-	// A live donor: every name has queued cache points. A plain native pin
-	// defers all of them; the merge-mode pin must still copy them natively.
-	donor.SetNativePendingCheck(func(string) bool { return true })
+	// A live donor: every fifth name has queued cache points. The native pin
+	// defers those, and the metric engine copies them.
+	live := map[string]bool{}
+	for i, name := range names {
+		if i%5 == 1 {
+			live[name] = true
+		}
+	}
+	donor.SetNativePendingCheck(func(name string) bool { return live[name] })
+	isPresent := map[string]bool{}
+	for _, name := range present {
+		isPresent[name] = true
+	}
+	nativeWant := 0
+	for _, name := range names {
+		if !isPresent[name] && !live[name] {
+			nativeWant++
+		}
+	}
 	donorServer := httptest.NewServer(nativeControllerService(t, donor))
 	defer donorServer.Close()
 	counts := map[string]*atomic.Int64{"/v1/native/pull": {}, "/v1/transfer/pull": {}}
@@ -121,8 +137,8 @@ func TestSyncNativeCopyMatchesMetricEngine(t *testing.T) {
 		t.Fatalf("native copy: %+v", res)
 	}
 	stats := nativeTarget.NativeStats()
-	if stats.CopiedNames != uint64(len(names)-len(present)) || stats.DeferredNames != uint64(len(present)) {
-		t.Fatalf("native path copied %d deferred %d, want %d/%d", stats.CopiedNames, stats.DeferredNames, len(names)-len(present), len(present))
+	if stats.CopiedNames != uint64(nativeWant) || stats.DeferredNames != uint64(len(names)-nativeWant) {
+		t.Fatalf("native path copied %d deferred %d, want %d/%d", stats.CopiedNames, stats.DeferredNames, nativeWant, len(names)-nativeWant)
 	}
 	if counts["/v1/native/pull"].Load() != 1 || counts["/v1/transfer/pull"].Load() == 0 {
 		t.Fatalf("pulls native=%d metric=%d: present names must still use the metric engine", counts["/v1/native/pull"].Load(), counts["/v1/transfer/pull"].Load())

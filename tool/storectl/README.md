@@ -52,10 +52,10 @@ storectl ◀──── NativeReceipt (copied bitmap, skips, SST identities) �
 2. **copy** — copy missing names from a source that holds them, after batched
    retention checks, in bounded waves. The default `--copy-engine metric` uses
    the metric engine (`/v1/transfer/pull`, target wins). With `--copy-engine
-   native` the target native-pulls them whole (`/v1/native/pull`, merge-mode donor
+   native` the target native-pulls them whole (`/v1/native/pull`, plain donor
    pin, create-if-absent SSTs) in ranges of at most 4,096 names; names the target
-   holds by then, failed ranges and stores without the native endpoint use the
-   metric engine. Native copies are credited in the same copy journal, so resume
+   holds by then, names the donor is still writing (deferred by the pin), failed
+   ranges and stores without the native endpoint use the metric engine. Native copies are credited in the same copy journal, so resume
    never repeats them, and `--resume` may switch the engine. The target admits
    `store-native-import-concurrency` native pulls at once (default 1), so on a
    target whose pebble ingest is slow the metric engine's parallel streams are
