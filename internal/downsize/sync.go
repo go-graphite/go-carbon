@@ -880,6 +880,9 @@ func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, nam
 		if phase == "fill" {
 			ctx = context.WithValue(ctx, syncCopyProgressKey{}, s.prog.copyCommitted)
 		}
+		if phase == "missing-batch" {
+			ctx = context.WithValue(ctx, syncAbsentCopyKey{}, true)
+		}
 		res, err = s.b.Copy(ctx, source, s.o.to, names, journal)
 	}
 	if err != nil {

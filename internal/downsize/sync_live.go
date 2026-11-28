@@ -36,6 +36,12 @@ type syncLiveOptions struct {
 	copyTemplate *copyOptions
 	carbonPort   int
 	copyStreams  int
+	// sourceStreams caps copy streams per donor at min(budget, donor, target)
+	// max_transfers; donors absent here use copyStreams.
+	sourceStreams map[string]int
+	// copyEngine is auto (native bulk path for absent names when both stores
+	// support it, else metric) or metric.
+	copyEngine   string
 	tokenEnv     string
 	hostWait     time.Duration
 	copyAttempts int
@@ -68,6 +74,8 @@ type syncLiveBackend struct {
 	windowCopySources    *nativeController // committed history is for repair, never absence proofs
 	windowPinned         time.Time
 	windowRestarted      atomic.Bool
+	nativeCaps           sync.Map // origin -> syncNativeCapability
+	nativeFallbackLogged sync.Map // "source target" -> true
 }
 
 // syncIOTime reports cumulative request time, including retries. Concurrent
@@ -602,6 +610,25 @@ func (b *syncLiveBackend) Fetch(ctx context.Context, store string, names []strin
 	return out, nil
 }
 
+// copyStreams is the copy stream budget for one donor.
+func (b *syncLiveBackend) copyStreams(source string) int {
+	if n := b.o.sourceStreams[source]; n > 0 {
+		return n
+	}
+	return b.o.copyStreams
+}
+
+// copyWaveNames sizes a donor's absent-name wave: its verify batch times its
+// own stream budget, and at least syncNativeWaveRanges native ranges, so one
+// wave's precheck and donor snapshot serve many target imports.
+func (b *syncLiveBackend) copyWaveNames(source string, batch int) int {
+	wave := batch * max(1, b.copyStreams(source))
+	if b.o.copyEngine != syncCopyEngineMetric {
+		wave = max(wave, syncNativeWaveRanges*int(nativeRangeNames))
+	}
+	return wave
+}
+
 func (b *syncLiveBackend) copyOptions(source, target, names, journal string, maxFailures int) copyOptions {
 	maxBytes, idle := b.o.copyBytes, b.o.copyIdle
 	if maxBytes == 0 {
@@ -617,7 +644,7 @@ func (b *syncLiveBackend) copyOptions(source, target, names, journal string, max
 			b.waiting.Add(-1)
 		}
 	}, auth: b.o.auth, rate: b.o.rate, froms: []string{source}, to: target, names: names, state: journal, engine: "metric", tokenEnv: b.o.tokenEnv,
-		streams: b.o.copyStreams, maxBytes: maxBytes, maxNames: 8192, maxFailures: maxFailures,
+		streams: b.copyStreams(source), maxBytes: maxBytes, maxNames: 8192, maxFailures: maxFailures,
 		tick: 2 * time.Second, maxBackoff: 30 * time.Second, transferIdle: idle, stallTimeout: 30 * time.Minute}
 	if b.o.copyTemplate != nil {
 		template := b.o.copyTemplate
@@ -650,6 +677,17 @@ func (b *syncLiveBackend) Copy(ctx context.Context, source, target string, names
 	}
 	if result, handled, err := b.resumeAbsentCopy(ctx, source, target, names, namesPath, journal, progress); handled || err != nil {
 		return result, err
+	}
+	if copied, err := b.nativeCopy(ctx, source, target, names, namesPath, journal, progress); err != nil {
+		return syncCopyResult{}, err
+	} else if copied > 0 {
+		remaining, err := copyJournalFailures(journal, source, names)
+		if err != nil {
+			return syncCopyResult{}, err
+		}
+		if len(remaining) == 0 {
+			return syncCopyResult{Copied: len(names)}, nil
+		}
 	}
 	probeNames := journal + ".probe.names"
 	if err := os.WriteFile(probeNames, []byte(names[0]+"\n"), 0o644); err != nil {

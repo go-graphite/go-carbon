@@ -799,6 +799,9 @@ func (s *syncer) copyMissing(ctx context.Context) error {
 			nextGroup = max(nextGroup, r.Round+1)
 		}
 		wave := s.o.batch * s.o.streams
+		if sized, ok := s.b.(interface{ copyWaveNames(string, int) int }); ok {
+			wave = sized.copyWaveNames(source, s.o.batch)
+		}
 		var fresh []string
 		for i, n := range names {
 			if reserved[i/64]&(uint64(1)<<uint(i%64)) == 0 && !s.copied[n] && !short[n] && !s.failedCp[n] {

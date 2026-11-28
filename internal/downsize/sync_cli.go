@@ -106,6 +106,7 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	flags.IntVar(&c.live.copyStreams, "copy-streams", 0, "deprecated compatibility flag: use --streams for the total budget; a different positive value is rejected")
 	flags.DurationVar(&c.live.hostWait, "host-wait", 30*time.Minute, "busy-store wait budget; restart failures are always retried until cancellation")
 	flags.IntVar(&c.live.copyAttempts, "copy-attempts", 6, "copy engine runs per name list, resuming its journal")
+	flags.StringVar(&c.live.copyEngine, "copy-engine", syncCopyEngineAuto, "auto: names absent on the target go whole through the native bulk path (/v1/native/pull) when the donor and target both serve it, names the target holds and native failures use the metric engine; metric: metric engine only")
 	if err := flags.Parse(args); err != nil {
 		return c, err
 	}
@@ -150,6 +151,9 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	if c.rate < 0 || c.copy.streams < 0 || c.live.copyStreams < 0 || c.copy.maxBytes < 65536 || c.copy.transferIdle <= 0 || c.copy.maxNames < 1 || c.copy.maxNames > chunkstore.MaxTransferMetrics || c.copy.maxFailures < 0 || c.copy.tick <= 0 || c.copy.maxBackoff < c.copy.tick || c.copy.stallTimeout <= 0 || c.copy.progressInterval <= 0 || c.live.hostWait <= 0 || c.live.copyAttempts < 1 {
 		return c, errors.New("invalid streams, batch limits, retry settings or timeouts")
 	}
+	if c.live.copyEngine != syncCopyEngineAuto && c.live.copyEngine != syncCopyEngineMetric {
+		return c, errors.New("--copy-engine accepts auto or metric")
+	}
 	if c.copy.engine != "metric" {
 		return c, errors.New("--engine accepts metric; native window mode is selected by --window --no-full-history")
 	}
@@ -179,7 +183,7 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	}
 	native := len(c.sync.windows) > 0 && !c.sync.fullHistory
 	if native {
-		for _, f := range []string{"max-batch-bytes", "copy-streams", "max-batch-names", "debt-guard", "retry-interval", "max-backoff", "stall-timeout", "max-failures", "engine", "copy-attempts"} {
+		for _, f := range []string{"max-batch-bytes", "copy-streams", "max-batch-names", "debt-guard", "retry-interval", "max-backoff", "stall-timeout", "max-failures", "engine", "copy-attempts", "copy-engine"} {
 			if c.explicit[f] {
 				return c, fmt.Errorf("--%s has no effect in native window sync; remove it or remove --no-full-history", f)
 			}
@@ -370,8 +374,10 @@ func SyncMain(ctx context.Context, args []string) error {
 	}
 	err = runSyncReadyPrepared(ctx, &c.sync, c.ready, backend, func() error {
 		streams := c.copy.streams
+		requested := streams
 		var sourceCapacity int
 		var target copyStatus
+		sourceStatus := map[string]copyStatus{}
 		for _, host := range c.live.authOrigins {
 			if capped := streams == 0 || !c.explicit["streams"]; !capped && host != c.sync.to {
 				continue
@@ -387,6 +393,7 @@ func SyncMain(ctx context.Context, args []string) error {
 			if host == c.sync.to {
 				target = status
 			} else {
+				sourceStatus[host] = status
 				if status.MaxTransfers > 0 {
 					if sourceCapacity == 0 || status.MaxTransfers < sourceCapacity {
 						sourceCapacity = status.MaxTransfers
@@ -402,6 +409,21 @@ func SyncMain(ctx context.Context, args []string) error {
 		c.sync.streams = streams
 		c.live.copyStreams = streams
 		c.copy.streams = streams
+		// Each copy stream holds a slot on one donor and the target only, so
+		// a donor's copy budget is min(budget, that donor, target), not the
+		// smallest donor's. An explicit --streams is used as given.
+		c.live.sourceStreams = nil
+		if !c.explicit["streams"] {
+			c.live.sourceStreams = map[string]int{}
+			for host, status := range sourceStatus {
+				budget := defaultCopyStreams(status.MaxTransfers, target.MaxTransfers)
+				if requested > 0 {
+					budget = min(requested, budget)
+				}
+				c.live.sourceStreams[host] = budget
+			}
+			event("copy_source_streams", map[string]any{"streams": c.live.sourceStreams, "verify_streams": streams})
+		}
 		c.sync.policy = c.policy(streams)
 		if c.sync.policy.CopyBatchBytes > 0 && target.MaxBodyBytes > 0 {
 			c.sync.policy.CopyBatchBytes = min(c.sync.policy.CopyBatchBytes, target.MaxBodyBytes)
