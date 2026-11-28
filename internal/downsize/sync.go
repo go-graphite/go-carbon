@@ -1210,11 +1210,17 @@ func (s *syncer) verifyAndFill(ctx context.Context) (err error) {
 		names = append(names, n)
 	}
 	sort.Strings(names)
+	native, _ := s.b.(interface{ windowFailureReason(string) string })
 	for _, n := range names {
 		for _, h := range latest[n] {
 			reason := "copy_failed"
 			if limit := s.o.roundLimit(); limit > 0 && s.sum.Rounds >= limit {
 				reason = "round_limit"
+			}
+			if native != nil {
+				if why := native.windowFailureReason(n); why != "" {
+					reason = "native window copy unconverged: " + why
+				}
 			}
 			switch {
 			case s.forbid[h.Source]:
