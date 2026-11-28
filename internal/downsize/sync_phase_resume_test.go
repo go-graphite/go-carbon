@@ -431,3 +431,20 @@ func TestSyncSettledWindowsCompatible(t *testing.T) {
 		}
 	}
 }
+
+// Options saved by a release build 10 minutes after launch, while the window
+// was still settling (Until 1795861178 of 1795861440). Every later resume
+// refused this state before the fix.
+func TestSyncPhaseOptionsAcceptReleaseStateSavedWhileSettling(t *testing.T) {
+	s, _ := phaseResumeFixture(t)
+	s.o.windows = syncRanges{{Name: "prelaunch", From: 1795857840, Until: 1795861440}}
+	s.o.fullHistory, s.o.settle, s.o.batch = true, 10*time.Minute, 500
+	s.o.now = func() time.Time { return time.Unix(1795869600, 0) }
+	saved := `{"NoCopy":false,"NoVerify":false,"FullHistory":true,"Settle":600000000000,"Batch":500,"Windows":[{"Name":"prelaunch","From":1795857840,"Until":1795861178}]}`
+	if !s.compatiblePhaseOptions(saved) {
+		t.Fatal("release state saved while its window settled is refused")
+	}
+	if s.compatiblePhaseOptions(strings.Replace(saved, "1795857840", "1795857900", 1)) {
+		t.Fatal("a moved window start is accepted")
+	}
+}
