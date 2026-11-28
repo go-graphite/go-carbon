@@ -280,8 +280,8 @@ func TestSyncCopyWavePerSource(t *testing.T) {
 	}
 }
 
-// The engine is operational: a running copy may switch on --resume, and old
-// states without the flag keep the metric engine.
+// The engine is operational: a running copy may switch on --resume, it is
+// never saved, and a resume without it uses the metric engine.
 func TestSyncCopyEngineFlagAndResume(t *testing.T) {
 	state := filepath.Join(t.TempDir(), "state")
 	secret := syncTestJWTSecret(t)
@@ -313,11 +313,9 @@ func TestSyncCopyEngineFlagAndResume(t *testing.T) {
 	if err := json.Unmarshal(raw, &saved); err != nil {
 		t.Fatal(err)
 	}
-	flags := saved["flags"].(map[string]any)
-	delete(flags, "copy-engine")
-	raw, _ = json.Marshal(saved)
-	if err := os.WriteFile(filepath.Join(state, "config.json"), raw, 0600); err != nil {
-		t.Fatal(err)
+	// Never saved: older builds reject unknown saved flags on --resume.
+	if _, ok := saved["flags"].(map[string]any)["copy-engine"]; ok {
+		t.Fatalf("copy-engine saved in %s", raw)
 	}
 	r, err = parseSyncCommand([]string{"--resume", state})
 	if err != nil || r.live.copyEngine != syncCopyEngineMetric {

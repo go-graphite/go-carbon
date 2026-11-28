@@ -139,13 +139,15 @@ func (c *syncCommand) captureConfig(flags *flag.FlagSet) {
 	}
 	flags.VisitAll(func(f *flag.Flag) {
 		switch f.Name {
-		case "resume", "from", "allow-fresh-start":
+		// copy-engine is chosen per invocation and never saved, so a state
+		// written by this build still resumes with older builds.
+		case "resume", "from", "allow-fresh-start", "copy-engine":
 			return
 		}
 		c.config.Flags[f.Name] = f.Value.String()
 	})
 	for name, explicit := range c.explicit {
-		if name != "resume" && name != "allow-fresh-start" {
+		if name != "resume" && name != "allow-fresh-start" && name != "copy-engine" {
 			c.config.Explicit[name] = explicit
 		}
 	}
