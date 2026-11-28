@@ -68,13 +68,26 @@ type syncRedoContextKey struct{}
 
 func newSyncRedoGuard(j *syncJournal) *syncRedoGuard {
 	g := &syncRedoGuard{j: j, seen: map[uint64][]syncRedoRange{}, imports: map[string][]syncRow{}, importMax: map[string][]string{}}
+	// Replay appends and merges each key in amortized batches. Inserting row by
+	// row moved the whole sorted slice per out-of-order range: quadratic in a
+	// key's disjoint ranges, so a long journal took hours to resume.
+	merged := map[uint64]int{}
 	for _, row := range j.rows {
 		for _, w := range row.Work {
-			g.remember(w)
+			for _, k := range w.Keys {
+				g.seen[k] = append(g.seen[k], w.IDs...)
+				if len(g.seen[k]) >= 2*merged[k]+redoReplayBatch {
+					g.seen[k] = redoNormalize(g.seen[k])
+					merged[k] = len(g.seen[k])
+				}
+			}
 		}
 		if row.Kind == "copied" {
 			g.imports[row.Source] = append(g.imports[row.Source], row)
 		}
+	}
+	for k, r := range g.seen {
+		g.seen[k] = redoNormalize(r)
 	}
 	for source := range g.imports {
 		sort.SliceStable(g.imports[source], func(i, j int) bool { return g.imports[source][i].First < g.imports[source][j].First })
@@ -119,6 +132,24 @@ func redoMerge(r []syncRedoRange, add syncRedoRange) []syncRedoRange {
 	r[i] = add
 	copy(r[i+1:], r[end:])
 	return r[:len(r)-(end-i)+1]
+}
+
+// redoReplayBatch bounds unmerged replay ranges per key before a merge.
+const redoReplayBatch = 1 << 16
+
+// redoNormalize returns the same union redoMerge builds incrementally: sorted,
+// disjoint ranges with overlapping and adjacent ranges joined. It reuses r.
+func redoNormalize(r []syncRedoRange) []syncRedoRange {
+	sort.Slice(r, func(i, j int) bool { return r[i].First < r[j].First })
+	out := r[:0]
+	for _, x := range r {
+		if n := len(out); n > 0 && x.First <= out[n-1].Last+1 {
+			out[n-1].Last = max(out[n-1].Last, x.Last)
+			continue
+		}
+		out = append(out, x)
+	}
+	return out
 }
 func redoRuns(ids []int64) []syncRedoRange {
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
