@@ -26,7 +26,11 @@ func (p *pipedFakeSync) Copy(ctx context.Context, source, target string, names [
 	defer p.active.Add(-1)
 	for peak := p.peak.Load(); n > peak && !p.peak.CompareAndSwap(peak, n); peak = p.peak.Load() {
 	}
-	time.Sleep(5 * time.Millisecond)
+	// Hold the first waves until another one arrives (or 2 s pass), so the
+	// test sees overlap however slowly the journal fsyncs on a loaded host.
+	for deadline := time.Now().Add(2 * time.Second); p.peak.Load() < 2 && time.Now().Before(deadline); {
+		time.Sleep(time.Millisecond)
+	}
 	if p.calls.Add(1) == p.cancelAt && p.cancel != nil {
 		p.cancel()
 	}
