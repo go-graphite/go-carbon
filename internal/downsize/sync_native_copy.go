@@ -29,7 +29,7 @@ import (
 type syncAbsentCopyKey struct{}
 
 const (
-	syncCopyEngineAuto   = "auto"
+	syncCopyEngineNative = "native"
 	syncCopyEngineMetric = "metric"
 	// syncNativeWaveRanges is the minimum native ranges per absent-name wave.
 	syncNativeWaveRanges = 8
@@ -110,7 +110,7 @@ func nativeRanges(names []string) [][2]int {
 // nativeCopy copies the wave's uncovered names through /v1/native/pull and
 // credits copied runs in the copy journal. It returns the names it copied.
 func (b *syncLiveBackend) nativeCopy(ctx context.Context, source, target string, names []string, namesPath, journal string, progress func(int64, bool)) (int, error) {
-	if b.o.copyEngine == syncCopyEngineMetric || len(names) == 0 {
+	if b.o.copyEngine != syncCopyEngineNative || len(names) == 0 {
 		return 0, nil
 	}
 	if absent, _ := ctx.Value(syncAbsentCopyKey{}).(bool); !absent {

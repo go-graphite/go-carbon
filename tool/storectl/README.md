@@ -49,8 +49,18 @@ storectl ◀──── NativeReceipt (copied bitmap, skips, SST identities) �
    selected metric names and identify the names missing on the target.
    `--ring` keeps only names the target owns. `--names` restricts the selected
    names to a fixed list.
-2. **copy** — native-pull missing names from a source that holds them, after
-   batched retention checks, in bounded waves (window-only exports with `--window --no-full-history`).
+2. **copy** — copy missing names from a source that holds them, after batched
+   retention checks, in bounded waves. The default `--copy-engine metric` uses
+   the metric engine (`/v1/transfer/pull`, target wins). With `--copy-engine
+   native` the target native-pulls them whole (`/v1/native/pull`, merge-mode donor
+   pin, create-if-absent SSTs) in ranges of at most 4,096 names; names the target
+   holds by then, failed ranges and stores without the native endpoint use the
+   metric engine. Native copies are credited in the same copy journal, so resume
+   never repeats them, and `--resume` may switch the engine. The target admits
+   `store-native-import-concurrency` native pulls at once (default 1), so on a
+   target whose pebble ingest is slow the metric engine's parallel streams are
+   faster; compare both on one host first. Window-only exports run with
+   `--window --no-full-history`.
 3. **verify** — read source and target over every archive and window
    (`/v1/transfer/digest` and `/render/` point reads) and list holes per
    `(name, source)`. Later rounds re-read only names that were filled or changed.
@@ -246,9 +256,12 @@ Windows are half-open `[FROM, UNTIL)` in Unix seconds.
 - `--no-copy` makes verification read-only: missing coverage stays residual.
   `--no-verify` stops after discovery/copy and does not prove readiness.
 - `--streams` is the total per-host transfer budget, default 64. Unless set explicitly,
-  the default is lowered to the smallest `max_transfers` the source or target
-  advertises, so it never causes 429 storms; an explicit value is used as given. Zero
-  resolves only the advertised capacity (the smallest advertised per-host cap for end-to-end sync).
+  verification uses the smallest `max_transfers` any source or the target advertises,
+  and each donor's copy streams are min(budget, that donor's, the target's
+  `max_transfers`), so a small donor no longer slows the others' copy; nothing causes
+  429 storms. An explicit value is used as given for every phase. Zero resolves only
+  the advertised capacity. Absent-name waves hold verify-batch × that donor's copy
+  streams names, at least 8 native ranges (32,768 names) with the native engine.
   `--progress-interval` defaults to 60s for sync. Verify and copy are serial phases, so each can use the
   entire budget. Native window fills run disjoint ranges of at most 4,096 names
   concurrently up to this budget, preserving donor order and durable range receipts.

@@ -39,8 +39,8 @@ type syncLiveOptions struct {
 	// sourceStreams caps copy streams per donor at min(budget, donor, target)
 	// max_transfers; donors absent here use copyStreams.
 	sourceStreams map[string]int
-	// copyEngine is auto (native bulk path for absent names when both stores
-	// support it, else metric) or metric.
+	// copyEngine is metric (default) or native: absent names take the native
+	// bulk path when both stores serve it, everything else the metric engine.
 	copyEngine   string
 	tokenEnv     string
 	hostWait     time.Duration
@@ -623,7 +623,7 @@ func (b *syncLiveBackend) copyStreams(source string) int {
 // wave's precheck and donor snapshot serve many target imports.
 func (b *syncLiveBackend) copyWaveNames(source string, batch int) int {
 	wave := batch * max(1, b.copyStreams(source))
-	if b.o.copyEngine != syncCopyEngineMetric {
+	if b.o.copyEngine == syncCopyEngineNative {
 		wave = max(wave, syncNativeWaveRanges*int(nativeRangeNames))
 	}
 	return wave

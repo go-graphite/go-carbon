@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -116,7 +117,7 @@ func TestSyncNativeCopyMatchesMetricEngine(t *testing.T) {
 	if res := run(metricServer.URL, syncCopyEngineMetric); res.Copied != len(names) || len(res.Failed) != 0 {
 		t.Fatalf("metric copy: %+v", res)
 	}
-	if res := run(nativeServer.URL, syncCopyEngineAuto); res.Copied != len(names) || len(res.Failed) != 0 {
+	if res := run(nativeServer.URL, syncCopyEngineNative); res.Copied != len(names) || len(res.Failed) != 0 {
 		t.Fatalf("native copy: %+v", res)
 	}
 	stats := nativeTarget.NativeStats()
@@ -160,7 +161,7 @@ func TestSyncNativeCopyResumeRedoesNothing(t *testing.T) {
 	defer targetServer.Close()
 	journal := filepath.Join(t.TempDir(), "copy.jsonl")
 	for range 2 {
-		b := newSyncLiveBackend(syncLiveOptions{copyStreams: 2, copyAttempts: 1})
+		b := newSyncLiveBackend(syncLiveOptions{copyStreams: 2, copyAttempts: 1, copyEngine: syncCopyEngineNative})
 		res, err := b.Copy(absentCopyContext(), donorServer.URL, targetServer.URL, names, journal)
 		if err != nil {
 			t.Fatal(err)
@@ -186,7 +187,7 @@ func TestSyncNativeCopyOnlyForAbsentPhase(t *testing.T) {
 	defer donorServer.Close()
 	targetServer := httptest.NewServer(nativeControllerService(t, target))
 	defer targetServer.Close()
-	b := newSyncLiveBackend(syncLiveOptions{copyStreams: 2, copyAttempts: 1})
+	b := newSyncLiveBackend(syncLiveOptions{copyStreams: 2, copyAttempts: 1, copyEngine: syncCopyEngineNative})
 	if _, err := b.Copy(context.Background(), donorServer.URL, targetServer.URL, names, filepath.Join(t.TempDir(), "fill.jsonl")); err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +217,7 @@ func TestSyncNativeCopyFallsBackWithoutEndpoint(t *testing.T) {
 	defer donorServer.Close()
 	targetServer := httptest.NewServer(nativeControllerService(t, target))
 	defer targetServer.Close()
-	b := newSyncLiveBackend(syncLiveOptions{copyStreams: 2, copyAttempts: 1})
+	b := newSyncLiveBackend(syncLiveOptions{copyStreams: 2, copyAttempts: 1, copyEngine: syncCopyEngineNative})
 	dir := t.TempDir()
 	for i, wave := range [][]string{names[:20], names[20:]} {
 		res, err := b.Copy(absentCopyContext(), donorServer.URL, targetServer.URL, wave, filepath.Join(dir, fmt.Sprintf("w%d.jsonl", i)))
@@ -257,8 +258,53 @@ func TestSyncCopyWavePerSource(t *testing.T) {
 	if b.copyWaveNames("http://big:4242", 500) != 32000 || b.copyWaveNames("http://small:4242", 500) != 8000 {
 		t.Fatal("metric waves follow each donor's own budget")
 	}
-	b.o.copyEngine = syncCopyEngineAuto
+	b.o.copyEngine = syncCopyEngineNative
 	if w := b.copyWaveNames("http://small:4242", 500); w != syncNativeWaveRanges*int(nativeRangeNames) {
 		t.Fatalf("native wave %d", w)
+	}
+}
+
+// The engine is operational: a running copy may switch on --resume, and old
+// states without the flag keep the metric engine.
+func TestSyncCopyEngineFlagAndResume(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "state")
+	secret := syncTestJWTSecret(t)
+	if _, err := parseSyncCommand([]string{"--source", "host-a", "--to", "host-t", "--state", state, "--jwt-secret", secret, "--copy-engine", "bulk"}); err == nil {
+		t.Fatal("unknown --copy-engine accepted")
+	}
+	c, err := parseSyncCommand([]string{"--source", "host-a", "--to", "host-t", "--state", state, "--jwt-secret", secret})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.live.copyEngine != syncCopyEngineMetric {
+		t.Fatalf("default engine %q", c.live.copyEngine)
+	}
+	if err := os.MkdirAll(state, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.saveConfig(); err != nil {
+		t.Fatal(err)
+	}
+	r, err := parseSyncCommand([]string{"--resume", state, "--copy-engine", "native"})
+	if err != nil || r.live.copyEngine != syncCopyEngineNative {
+		t.Fatalf("resume override: %q %v", r.live.copyEngine, err)
+	}
+	raw, err := os.ReadFile(filepath.Join(state, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved map[string]any
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		t.Fatal(err)
+	}
+	flags := saved["flags"].(map[string]any)
+	delete(flags, "copy-engine")
+	raw, _ = json.Marshal(saved)
+	if err := os.WriteFile(filepath.Join(state, "config.json"), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	r, err = parseSyncCommand([]string{"--resume", state})
+	if err != nil || r.live.copyEngine != syncCopyEngineMetric {
+		t.Fatalf("old state: %q %v", r.live.copyEngine, err)
 	}
 }

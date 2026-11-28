@@ -106,7 +106,7 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	flags.IntVar(&c.live.copyStreams, "copy-streams", 0, "deprecated compatibility flag: use --streams for the total budget; a different positive value is rejected")
 	flags.DurationVar(&c.live.hostWait, "host-wait", 30*time.Minute, "busy-store wait budget; restart failures are always retried until cancellation")
 	flags.IntVar(&c.live.copyAttempts, "copy-attempts", 6, "copy engine runs per name list, resuming its journal")
-	flags.StringVar(&c.live.copyEngine, "copy-engine", syncCopyEngineAuto, "auto: names absent on the target go whole through the native bulk path (/v1/native/pull) when the donor and target both serve it, names the target holds and native failures use the metric engine; metric: metric engine only")
+	flags.StringVar(&c.live.copyEngine, "copy-engine", syncCopyEngineMetric, "metric: metric engine (/v1/transfer/pull, target wins); native: names absent on the target go whole through the native bulk path (/v1/native/pull, merge-mode donor pin) when the donor and target both serve it, while names the target holds, failed ranges and stores without the endpoint use the metric engine. The target admits store-native-import-concurrency native pulls at once; may be changed on --resume")
 	if err := flags.Parse(args); err != nil {
 		return c, err
 	}
@@ -151,8 +151,8 @@ func parseSyncCommand(args []string) (syncCommand, error) {
 	if c.rate < 0 || c.copy.streams < 0 || c.live.copyStreams < 0 || c.copy.maxBytes < 65536 || c.copy.transferIdle <= 0 || c.copy.maxNames < 1 || c.copy.maxNames > chunkstore.MaxTransferMetrics || c.copy.maxFailures < 0 || c.copy.tick <= 0 || c.copy.maxBackoff < c.copy.tick || c.copy.stallTimeout <= 0 || c.copy.progressInterval <= 0 || c.live.hostWait <= 0 || c.live.copyAttempts < 1 {
 		return c, errors.New("invalid streams, batch limits, retry settings or timeouts")
 	}
-	if c.live.copyEngine != syncCopyEngineAuto && c.live.copyEngine != syncCopyEngineMetric {
-		return c, errors.New("--copy-engine accepts auto or metric")
+	if c.live.copyEngine != syncCopyEngineNative && c.live.copyEngine != syncCopyEngineMetric {
+		return c, errors.New("--copy-engine accepts metric or native")
 	}
 	if c.copy.engine != "metric" {
 		return c, errors.New("--engine accepts metric; native window mode is selected by --window --no-full-history")
