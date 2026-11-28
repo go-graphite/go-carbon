@@ -61,6 +61,7 @@ type syncLiveBackend struct {
 	busy                 atomic.Int64  // retries after 429 (all transfer slots taken)
 	timings              sync.Map      // phase + store -> *syncIOTime
 	windowSelectionSlots sync.Map      // source -> *windowSelectionCapacity
+	windowBudget         windowBudgets // per-process native window range retry budgets
 	evidenceOnce         sync.Once
 	evidenceSlots        chan struct{} // expiration-evidence requests in flight, all stores
 	windowMu             sync.RWMutex

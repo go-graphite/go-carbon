@@ -167,22 +167,35 @@ func reportWindowDeferred(t task, names []string, attempt int, exhausted bool) {
 	if exhausted {
 		level = "ERROR"
 	}
+	receipt, reasons := windowDeferredReasons(t, names)
+	for i, name := range names {
+		if reason, ok := reasons[i]; ok {
+			event("sync_window_deferred", map[string]any{"level": level, "metric": name, "source": t.Source, "target": t.Target, "receipt": receipt.Identity, "attempt": attempt, "reason": reason, "exhausted": exhausted})
+		}
+	}
+}
+
+// windowDeferredReasons maps each ordinal the latest receipt left undone to
+// the receiver's skip reason, or to the generic omission reason.
+func windowDeferredReasons(t task, names []string) (chunkstore.NativeReceipt, map[int]string) {
 	receipt := t.Native.Receipt
 	if n := len(t.Native.Combines); n > 0 && t.Native.Combines[n-1].Receipt != nil {
 		receipt = *t.Native.Combines[n-1].Receipt
 	}
-	reasons := make(map[int]string, len(receipt.Skipped))
+	skipped := make(map[int]string, len(receipt.Skipped))
 	for _, skip := range receipt.Skipped {
-		reasons[skip.Ordinal] = skip.Reason
+		skipped[skip.Ordinal] = skip.Reason
 	}
-	for i, name := range names {
+	reasons := map[int]string{}
+	for i := range names {
 		if t.Native.done(i) {
 			continue
 		}
-		reason := reasons[i]
+		reason := skipped[i]
 		if reason == "" {
 			reason = "native receipt omitted name without a reason (source absent, pending or changed; legacy target creation fence)"
 		}
-		event("sync_window_deferred", map[string]any{"level": level, "metric": name, "source": t.Source, "target": t.Target, "receipt": receipt.Identity, "attempt": attempt, "reason": reason, "exhausted": exhausted})
+		reasons[i] = reason
 	}
+	return receipt, reasons
 }

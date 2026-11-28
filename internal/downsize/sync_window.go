@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -551,7 +552,20 @@ func (b *syncLiveBackend) copyWindowOnce(ctx context.Context, source, target str
 					}
 					return b.finishWindowRangeCount(ctx, target, names[start:end], w, pointPath, measurement)
 				}
-				if t.Native == nil || !t.Native.complete() {
+				key := windowRangeKey(copy.journalPath, start, end)
+				spent := b.windowBudget.exhausted(key)
+				if spent != "" && (t.Native == nil || !t.Native.complete()) {
+					// This process already spent the range's native budget. Account
+					// its undone names below, without another transfer.
+					rangeFailed = true
+					if t.Native == nil {
+						for _, n := range names[start:end] {
+							b.windowBudget.recordName(n, spent)
+							markFailed(n)
+						}
+						return finishCount()
+					}
+				} else if t.Native == nil || !t.Native.complete() {
 					err := b.executeWindowRange(ctx, c, t, names[start:end])
 					if err != nil {
 						// A recursive split must release its borrowed source
@@ -581,6 +595,11 @@ func (b *syncLiveBackend) copyWindowOnce(ctx context.Context, source, target str
 					m.stateMu.Lock()
 					t = j.tasks[taskKey(t)]
 					m.stateMu.Unlock()
+					if !t.Native.complete() {
+						// A nil return with undone ordinals means their bounded
+						// deferral retries are exhausted; later passes skip them.
+						b.windowBudget.exhaust(key, "native deferral retries exhausted")
+					}
 					if err := b.o.rate.wait(ctx, t.Bytes); err != nil {
 						return err
 					}
@@ -604,13 +623,23 @@ func (b *syncLiveBackend) copyWindowOnce(ctx context.Context, source, target str
 						}
 						rangeFailed = true
 						markFailed(name)
+						b.windowBudget.recordName(name, "window boundary: "+skip.Reason)
 						event("sync_window_boundary_skip", map[string]any{"level": "warn", "metric": names[start+skip.Ordinal], "timestamp": skip.Timestamp, "reason": skip.Reason})
 					}
 				}
+				var reasons map[int]string
 				for i, n := range names[start:end] {
 					if !t.Native.done(i) {
+						if reasons == nil {
+							_, reasons = windowDeferredReasons(t, names[start:end])
+						}
 						rangeFailed = true
 						markFailed(n)
+						if strings.HasPrefix(spent, windowTransferExhausted) {
+							b.windowBudget.recordName(n, spent)
+						} else {
+							b.windowBudget.recordName(n, reasons[i])
+						}
 					}
 				}
 				return finishCount()
@@ -618,6 +647,12 @@ func (b *syncLiveBackend) copyWindowOnce(ctx context.Context, source, target str
 			if err != nil {
 				if ctx.Err() == nil && restartCopyError(err) {
 					retry = err
+					// Both stores answered this pass's capability checks, so a
+					// range that keeps failing is bounded rather than retried by
+					// every later pass of the host wait.
+					if why := b.windowBudget.failed(windowRangeKey(copy.journalPath, start, end), b.o.copyAttempts, err); why != "" {
+						event("sync_window_range_exhausted", map[string]any{"level": "ERROR", "source": source, "target": target, "start": start, "end": end, "names": end - start, "reason": why})
+					}
 					continue // other windows retain independent receipts
 				}
 				return err
