@@ -370,7 +370,8 @@ type syncResidual struct {
 }
 
 type syncer struct {
-	phaseMu              sync.Mutex // phase entry and progress publication are one transition
+	phaseMu              sync.Mutex  // phase entry and progress publication are one transition
+	pipeMu               *sync.Mutex // overlapping copy waves: held except around I/O (syncWavePipe)
 	resume               syncPhasePosition
 	phaseJournal         bool
 	newScope             []string
@@ -805,7 +806,10 @@ func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, nam
 			eligible = append(eligible, n)
 		}
 	}
-	excluded, err := s.expectedAbsent(ctx, eligible)
+	var excluded map[string]bool
+	var err error
+	// Target and donor expiration evidence only reads the stores.
+	s.ioUnlocked(func() { excluded, err = s.expectedAbsent(ctx, eligible) })
 	if err != nil {
 		return syncCopyResult{}, err
 	}
@@ -883,7 +887,7 @@ func (s *syncer) copyFrom(ctx context.Context, phase string, round, src int, nam
 		if phase == "missing-batch" {
 			ctx = context.WithValue(ctx, syncAbsentCopyKey{}, true)
 		}
-		res, err = s.b.Copy(ctx, source, s.o.to, names, journal)
+		s.ioUnlocked(func() { res, err = s.b.Copy(ctx, source, s.o.to, names, journal) })
 	}
 	if err != nil {
 		return res, err

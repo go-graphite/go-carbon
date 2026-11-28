@@ -76,7 +76,26 @@ type syncLiveBackend struct {
 	windowRestarted      atomic.Bool
 	nativeCaps           sync.Map // origin -> syncNativeCapability
 	nativeFallbackLogged sync.Map // "source target" -> true
+	pullSlots            sync.Map // source -> chan struct{}: pulls in flight across overlapping waves
+	sizers               sync.Map // source -> *batchSizer: learned bytes per name across waves
 }
+
+// copyPullSlots bounds one donor's pulls in flight to its stream budget,
+// across every wave copying from it at the same time.
+func (b *syncLiveBackend) copyPullSlots(source string) chan struct{} {
+	v, _ := b.pullSlots.LoadOrStore(source, make(chan struct{}, max(1, b.copyStreams(source))))
+	return v.(chan struct{})
+}
+
+func (b *syncLiveBackend) copySizer(source string) *batchSizer {
+	v, _ := b.sizers.LoadOrStore(source, &batchSizer{perName: copyInitialBytesPerName})
+	return v.(*batchSizer)
+}
+
+// copyPipelineDepth: waves of one donor copying at once. A wave's stragglers
+// then hold only their own pull slots; the next waves' prechecks, probes and
+// batches use the rest of the donor's stream budget.
+func (b *syncLiveBackend) copyPipelineDepth(string) int { return syncCopyPipelineDepth }
 
 // syncIOTime reports cumulative request time, including retries. Concurrent
 // calls overlap, so these seconds measure work, not elapsed phase time.
@@ -645,7 +664,8 @@ func (b *syncLiveBackend) copyOptions(source, target, names, journal string, max
 		}
 	}, auth: b.o.auth, rate: b.o.rate, froms: []string{source}, to: target, names: names, state: journal, engine: "metric", tokenEnv: b.o.tokenEnv,
 		streams: b.copyStreams(source), maxBytes: maxBytes, maxNames: 8192, maxFailures: maxFailures,
-		tick: 2 * time.Second, maxBackoff: 30 * time.Second, transferIdle: idle, stallTimeout: 30 * time.Minute}
+		tick: 2 * time.Second, maxBackoff: 30 * time.Second, transferIdle: idle, stallTimeout: 30 * time.Minute,
+		pullSlots: b.copyPullSlots(source), sizer: b.copySizer(source)}
 	if b.o.copyTemplate != nil {
 		template := b.o.copyTemplate
 		o.maxNames, o.tick, o.maxBackoff, o.stallTimeout = template.maxNames, template.tick, template.maxBackoff, template.stallTimeout

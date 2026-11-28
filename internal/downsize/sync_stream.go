@@ -598,16 +598,20 @@ func (s *syncer) dropShort(ctx context.Context, src int, names []string) (keep, 
 			}
 		}()
 	}
-feed:
-	for i := range rows {
-		select {
-		case jobs <- i:
-		case <-ctx.Done():
-			break feed
+	// The workers touch only their rows, the journal (which locks itself) and
+	// the donor, so overlapping waves may precheck while another one copies.
+	s.ioUnlocked(func() {
+	feed:
+		for i := range rows {
+			select {
+			case jobs <- i:
+			case <-ctx.Done():
+				break feed
+			}
 		}
-	}
-	close(jobs)
-	wg.Wait()
+		close(jobs)
+		wg.Wait()
+	})
 	if firstErr != nil {
 		return nil, nil, nil, firstErr
 	}
@@ -808,7 +812,12 @@ func (s *syncer) copyMissing(ctx context.Context) error {
 				fresh = append(fresh, n)
 			}
 		}
-		process := func(chunk []string, group int, prepared bool) error {
+		depth := 1
+		if p, ok := s.b.(interface{ copyPipelineDepth(string) int }); ok {
+			depth = max(1, p.copyPipelineDepth(source))
+		}
+		pipe := s.startWavePipe(ctx, depth)
+		process := func(ctx context.Context, chunk []string, group int, prepared bool) error {
 			unfinished := false
 			for _, n := range chunk {
 				unfinished = unfinished || (!s.copied[n] && !short[n] && !s.failedCp[n] && !s.o.issues.excluded(n))
@@ -872,22 +881,22 @@ func (s *syncer) copyMissing(ctx context.Context) error {
 		s.prog.advance(int64(len(s.copied) + len(short) + len(s.failedCp)))
 		s.prog.replayed.Add(s.prog.done.Load() - replayBase)
 		for _, r := range pending {
-			if err := process(r.Selected, r.Round, r.SelectionComplete); err != nil {
-				return err
-			}
-			if s.forbid[source] {
+			if !pipe.run(func(ctx context.Context) error { return process(ctx, r.Selected, r.Round, r.SelectionComplete) }) || s.forbid[source] {
 				break
 			}
 		}
-		for start := 0; start < len(fresh) && !s.forbid[source]; start += wave {
-			chunk := fresh[start:min(start+wave, len(fresh))]
-			if err := s.j.append(syncRow{Kind: "missing-wave", Source: source, Round: nextGroup, Selected: chunk}); err != nil {
-				return err
+		for start := 0; start < len(fresh) && !s.forbid[source] && !pipe.failed(); start += wave {
+			chunk, group := fresh[start:min(start+wave, len(fresh))], nextGroup
+			if err := s.j.append(syncRow{Kind: "missing-wave", Source: source, Round: group, Selected: chunk}); err != nil {
+				return errors.Join(err, pipe.wait())
 			}
-			if err := process(chunk, nextGroup, false); err != nil {
-				return err
+			if !pipe.run(func(ctx context.Context) error { return process(ctx, chunk, group, false) }) {
+				break
 			}
 			nextGroup++
+		}
+		if err := pipe.wait(); err != nil {
+			return err
 		}
 		for i := range missing {
 			if absentSource[missing[i].name] {
