@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func phaseResumeFixture(t *testing.T) (*syncer, *syncJournal) {
@@ -344,5 +345,89 @@ func TestSyncPhaseResumeRejectsDurableRegression(t *testing.T) {
 				t.Fatal("denied publication changed durable position", s.resume)
 			}
 		})
+	}
+}
+
+// A state saved while its requested window was still settling stores the
+// window clipped at that run's horizon. A resume after the window settled
+// recomputes the full window; that is the same scope, not a changed one.
+func TestSyncPhaseResumeAfterWindowSettled(t *testing.T) {
+	const until = int64(1_795_861_440)
+	launched := time.Unix(until+5*60, 0) // 5 min after the window ends, inside the 10 min settle
+	prelaunch := syncRanges{{Name: "prelaunch", From: until - 3600, Until: until}}
+	nested := syncRanges{{Name: "outer", From: until - 7200, Until: until}, {Name: "inner", From: until - 600, Until: until}}
+	for _, tc := range []struct {
+		name    string
+		windows syncRanges
+		resumed time.Time
+	}{
+		{"settled", prelaunch, launched.Add(20 * time.Minute)},
+		{"still settling", prelaunch, launched.Add(2 * time.Minute)},
+		{"nested windows", nested, launched.Add(time.Hour)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := convergeOptions(t)
+			o.from = []string{syncD1}
+			o.batch = 1
+			o.windows, o.fullHistory, o.settle = tc.windows, true, 10*time.Minute
+			o.now = func() time.Time { return launched }
+			identity, err := syncIdentity(o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			j, err := openSyncJournal(filepath.Join(o.state, "sync.jsonl"), identity)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(j.close)
+			s := &syncer{o: o, j: j, b: newFakeSync(), copied: map[string]bool{}, forbid: map[string]bool{}, failedCp: map[string]bool{}}
+			s.sum.phases = map[string]*syncPhase{}
+			if got := s.copyWindows(); got[len(got)-1].Until != until-5*60 {
+				t.Fatalf("fixture must save a clipped window, got %+v", got)
+			}
+			if err := s.savePhase("copy", 0, 7, 11); err != nil {
+				t.Fatal(err)
+			}
+			policy, _ := json.Marshal([]any{s.o.batch, s.copyWindows()})
+			s = restartPhaseFixture(t, s)
+			s.o.now = func() time.Time { return tc.resumed }
+			if err := s.restorePhase(); err != nil {
+				t.Fatalf("resume refused: %v", err)
+			}
+			if s.resume.Phase != "copy" || s.resume.Done != 7 {
+				t.Fatalf("resume position lost: %+v", s.resume)
+			}
+			if !s.compatibleWindowPolicy(string(policy)) {
+				t.Fatal("window policy saved before settling refused")
+			}
+			s.o.batch++
+			if s.compatibleWindowPolicy(string(policy)) {
+				t.Fatal("window policy accepted a changed batch size")
+			}
+		})
+	}
+}
+
+// Only the requested windows clipped at an older horizon are compatible.
+func TestSyncSettledWindowsCompatible(t *testing.T) {
+	s, _ := phaseResumeFixture(t)
+	s.o.windows = syncRanges{{Name: "w", From: 1000, Until: 5000}}
+	s.o.settle = 0
+	s.o.now = func() time.Time { return time.Unix(3000, 0) }
+	for _, tc := range []struct {
+		name  string
+		saved syncRanges
+		ok    bool
+	}{
+		{"current", syncRanges{{Name: "w", From: 1000, Until: 3000}}, true},
+		{"older horizon", syncRanges{{Name: "w", From: 1000, Until: 2000}}, true},
+		{"future horizon", syncRanges{{Name: "w", From: 1000, Until: 4000}}, false},
+		{"moved start", syncRanges{{Name: "w", From: 1500, Until: 2000}}, false},
+		{"renamed", syncRanges{{Name: "x", From: 1000, Until: 2000}}, false},
+		{"empty", nil, false},
+	} {
+		if got := s.settledWindowsCompatible(tc.saved); got != tc.ok {
+			t.Errorf("%s: compatible=%v, want %v", tc.name, got, tc.ok)
+		}
 	}
 }
